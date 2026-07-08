@@ -248,8 +248,8 @@ export class Engine {
     const rect = this.canvas.getBoundingClientRect();
     const x = ((e.clientX - rect.left) / rect.width) * this.w;
     const y = ((e.clientY - rect.top) / rect.height) * this.h;
-    // pause button (top-right)
-    if (x > this.w - 64 && y < 64) {
+    // pause button (top-right) — generous tap target for mobile
+    if (x > this.w - 84 * this.dpr && y < 60 * this.dpr) {
       if (!this.paused && !this.ended) {
         this.pause();
         this.cb.onPauseRequest();
@@ -923,12 +923,29 @@ export class Engine {
       g.fillText(`${acc.toFixed(1)}%`, pad, pad + 36 * dpr);
     }
 
-    // Pause button
-    g.fillStyle = 'rgba(255,255,255,0.7)';
-    const px = w - 30 * dpr;
-    const py = 16 * dpr;
-    g.fillRect(px, py, 5 * dpr, 16 * dpr);
-    g.fillRect(px + 9 * dpr, py, 5 * dpr, 16 * dpr);
+    // Pause button: visible pill, top-right
+    const pw = 48 * dpr;
+    const ph = 32 * dpr;
+    const px = w - pw - 12 * dpr;
+    const py = 12 * dpr;
+    const pr = ph / 2;
+    g.beginPath();
+    g.moveTo(px + pr, py);
+    g.lineTo(px + pw - pr, py);
+    g.arc(px + pw - pr, py + pr, pr, -Math.PI / 2, Math.PI / 2);
+    g.lineTo(px + pr, py + ph);
+    g.arc(px + pr, py + pr, pr, Math.PI / 2, -Math.PI / 2);
+    g.closePath();
+    g.fillStyle = 'rgba(10, 8, 30, 0.55)';
+    g.fill();
+    g.strokeStyle = 'rgba(255,255,255,0.4)';
+    g.lineWidth = 1.2 * dpr;
+    g.stroke();
+    g.fillStyle = 'rgba(255,255,255,0.9)';
+    const bx = px + pw / 2 - 6.5 * dpr;
+    const by = py + 9 * dpr;
+    g.fillRect(bx, by, 4.5 * dpr, 14 * dpr);
+    g.fillRect(bx + 8.5 * dpr, by, 4.5 * dpr, 14 * dpr);
 
     // Combo
     if (this.combo >= 2) {

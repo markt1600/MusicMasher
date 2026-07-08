@@ -253,14 +253,15 @@ export default function GameScreen({ songId }: { songId: string }) {
       {phase === 'paused' && (
         <div className="overlay">
           <h1>Paused</h1>
+          <p className="subtle">{title}</p>
           <button className="big-btn" onClick={resumeGame}>
-            Resume
+            ▶ &nbsp;Resume
           </button>
           <button className="ghost-btn" onClick={() => void startGame()}>
-            Restart
+            ↻ &nbsp;Restart song
           </button>
           <button className="ghost-btn" onClick={exit}>
-            Quit
+            ♫ &nbsp;Choose another song
           </button>
           <div className="offset-row">
             <button onClick={() => changeOffset(-10)}>−</button>
@@ -302,10 +303,10 @@ export default function GameScreen({ songId }: { songId: string }) {
             </div>
           </div>
           <button className="big-btn" onClick={() => void startGame()}>
-            Play again
+            ↻ &nbsp;Play again
           </button>
           <button className="ghost-btn" onClick={exit}>
-            Back to library
+            ♫ &nbsp;Choose another song
           </button>
         </div>
       )}

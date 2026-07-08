@@ -433,6 +433,31 @@ button {
   width: min(260px, 70vw);
 }
 
+.upload-link {
+  display: block;
+  width: 100%;
+  margin-top: 18px;
+  padding: 15px;
+  border-radius: 15px;
+  border: 1.5px dashed rgba(90, 230, 255, 0.35);
+  color: var(--muted);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: center;
+  transition: border-color 0.15s, color 0.15s, box-shadow 0.2s;
+}
+
+.upload-link:hover {
+  border-color: var(--neon);
+  color: var(--text);
+  box-shadow: 0 0 20px rgba(55, 245, 228, 0.12);
+}
+
+.upload-section {
+  margin-top: 18px;
+  margin-bottom: 0;
+}
+
 /* ---------- Admin ---------- */
 
 .admin-card {

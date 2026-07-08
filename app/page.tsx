@@ -136,6 +136,7 @@ export default function LibraryPage() {
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingUpload | null>(null);
+  const [showUpload, setShowUpload] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
@@ -230,6 +231,7 @@ export default function LibraryPage() {
         }
 
         setStatus(null);
+        setShowUpload(false);
         await refresh();
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Upload failed.');
@@ -314,11 +316,58 @@ export default function LibraryPage() {
     <main className="shell">
       <h1 className="logo">MusicMasher</h1>
       <p className="tagline">
-        Drop a song → get a beat-synced tile game. Songs are shared with everyone.
+        Pick a song and tap to the beat — tiles fall in sync with the music.
       </p>
 
+      <div className="library-head">
+        <div className="section-title">Song library</div>
+        {(songs?.length ?? 0) > 0 && (
+          <button className="random-btn" onClick={playRandom}>
+            🎲 Random
+          </button>
+        )}
+      </div>
+      <div className="song-list">
+        {songs === null && <div className="empty-note">Loading songs…</div>}
+        {songs?.map((s) => (
+          <SongCard
+            key={s.id}
+            title={s.title}
+            sub={[
+              s.artist,
+              formatDuration(s.duration),
+              new Date(s.createdAt).toLocaleDateString(),
+            ]
+              .filter(Boolean)
+              .join(' · ')}
+            href={`/play/${s.id}`}
+            icon="🎧"
+          />
+        ))}
+        {songs?.length === 0 && (
+          <>
+            <SongCard
+              title={DEMO_SONG.title}
+              sub={`${formatDuration(DEMO_SONG.duration)} · built-in synthwave`}
+              href="/play/demo"
+              icon="✨"
+            />
+            <div className="empty-note">
+              No uploads yet — add the first song below!
+            </div>
+          </>
+        )}
+      </div>
+
+      {!showUpload && (
+        <button className="upload-link" onClick={() => setShowUpload(true)}>
+          ＋ Upload a new song
+        </button>
+      )}
+
+      {showUpload && (
       <div
-        className={`dropzone${drag ? ' drag' : ''}`}
+        className={`dropzone upload-section${drag ? ' drag' : ''}`}
         onClick={() => !uploading && !pending && fileInput.current?.click()}
         onDragOver={(e) => {
           e.preventDefault();
@@ -366,44 +415,7 @@ export default function LibraryPage() {
           }}
         />
       </div>
-
-      <div className="library-head">
-        <div className="section-title">Song library</div>
-        {(songs?.length ?? 0) > 0 && (
-          <button className="random-btn" onClick={playRandom}>
-            🎲 Random
-          </button>
-        )}
-      </div>
-      <div className="song-list">
-        <SongCard
-          title={DEMO_SONG.title}
-          sub={`${formatDuration(DEMO_SONG.duration)} · built-in synthwave`}
-          href="/play/demo"
-          icon="✨"
-        />
-        {songs === null && <div className="empty-note">Loading songs…</div>}
-        {songs?.map((s) => (
-          <SongCard
-            key={s.id}
-            title={s.title}
-            sub={[
-              s.artist,
-              formatDuration(s.duration),
-              new Date(s.createdAt).toLocaleDateString(),
-            ]
-              .filter(Boolean)
-              .join(' · ')}
-            href={`/play/${s.id}`}
-            icon="🎧"
-          />
-        ))}
-        {songs?.length === 0 && (
-          <div className="empty-note">
-            No uploads yet — be the first to add a song!
-          </div>
-        )}
-      </div>
+      )}
 
       <div className="keys-hint">
         Mobile: tap the three lanes.
