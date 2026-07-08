@@ -2,11 +2,32 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { upload } from '@vercel/blob/client';
 import type { SongMeta } from '@/lib/types';
 import { DEMO_SONG } from '@/lib/demo-song';
+import { decodeAudio } from '@/lib/aiff';
 
-const MAX_BYTES = 25 * 1024 * 1024;
+const MAX_BYTES = 50 * 1024 * 1024;
+
+/** Supported formats → upload content type. Must mirror AUDIO_TYPES on the server. */
+const EXT_TYPES: Record<string, string> = {
+  mp3: 'audio/mpeg',
+  aac: 'audio/aac',
+  m4a: 'audio/mp4',
+  aiff: 'audio/aiff',
+  aif: 'audio/aiff',
+  wav: 'audio/wav',
+};
+
+const ACCEPT = '.mp3,.aac,.m4a,.aiff,.aif,.wav,audio/mpeg,audio/aac,audio/mp4,audio/aiff,audio/x-aiff,audio/wav,audio/x-wav';
+
+interface PendingUpload {
+  file: File;
+  ext: string;
+  title: string;
+  artist: string;
+}
 
 function formatDuration(sec: number): string {
   const m = Math.floor(sec / 60);
@@ -25,13 +46,40 @@ function newSongId(): string {
   return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 }
 
+function fileExt(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+function fileStem(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return (dot > 0 ? name.slice(0, dot) : name).slice(0, 80);
+}
+
 async function measureDuration(data: ArrayBuffer): Promise<number> {
   const ctx = new OfflineAudioContext(1, 1, 44100);
-  const buf = await ctx.decodeAudioData(data);
+  const buf = await decodeAudio(data, ctx);
   return buf.duration;
 }
 
+/** Read embedded title/artist tags (ID3, MP4 atoms, RIFF INFO, AIFF chunks). */
+async function readTags(
+  file: File
+): Promise<{ title: string | null; artist: string | null }> {
+  try {
+    const mm = await import('music-metadata');
+    const meta = await mm.parseBlob(file, { duration: false, skipCovers: true });
+    return {
+      title: meta.common.title?.trim() || null,
+      artist: meta.common.artist?.trim() || null,
+    };
+  } catch {
+    return { title: null, artist: null };
+  }
+}
+
 export default function LibraryPage() {
+  const router = useRouter();
   const [songs, setSongs] = useState<SongMeta[] | null>(null);
   const [mode, setMode] = useState<'blob' | 'local'>('local');
   const [drag, setDrag] = useState(false);
@@ -39,6 +87,7 @@ export default function LibraryPage() {
   const [progress, setProgress] = useState<number | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pending, setPending] = useState<PendingUpload | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
@@ -56,25 +105,11 @@ export default function LibraryPage() {
     void refresh();
   }, [refresh]);
 
-  const handleFile = useCallback(
-    async (file: File) => {
-      setError(null);
-      if (uploading) return;
-      const isMp3 =
-        file.type === 'audio/mpeg' ||
-        file.type === 'audio/mp3' ||
-        /\.mp3$/i.test(file.name);
-      if (!isMp3) {
-        setError('Please drop an MP3 file.');
-        return;
-      }
-      if (file.size > MAX_BYTES) {
-        setError('File is too large — 25 MB max.');
-        return;
-      }
-
+  const doUpload = useCallback(
+    async (file: File, ext: string, title: string, artist: string) => {
       setUploading(true);
       setProgress(null);
+      setError(null);
       try {
         setStatus('Checking audio…');
         const arrayBuf = await file.arrayBuffer();
@@ -82,20 +117,21 @@ export default function LibraryPage() {
         try {
           duration = await measureDuration(arrayBuf.slice(0));
         } catch {
-          throw new Error("Couldn't decode this file as audio.");
+          throw new Error(
+            "Your browser couldn't decode this file — try converting it to MP3."
+          );
         }
         if (duration < 15) throw new Error('Song must be at least 15 seconds.');
         if (duration > 60 * 20) throw new Error('Song must be under 20 minutes.');
 
         const id = newSongId();
-        const title = file.name.replace(/\.mp3$/i, '').slice(0, 80);
         setStatus('Uploading…');
 
         if (mode === 'blob') {
-          const blob = await upload(`songs/${id}/audio.mp3`, file, {
+          const blob = await upload(`songs/${id}/audio.${ext}`, file, {
             access: 'public',
             handleUploadUrl: '/api/songs/upload',
-            contentType: 'audio/mpeg',
+            contentType: EXT_TYPES[ext],
             onUploadProgress: ({ percentage }) => setProgress(percentage),
           });
           const reg = await fetch('/api/songs/register', {
@@ -104,6 +140,8 @@ export default function LibraryPage() {
             body: JSON.stringify({
               id,
               title,
+              artist,
+              ext,
               duration,
               size: file.size,
               audioUrl: blob.url,
@@ -118,6 +156,8 @@ export default function LibraryPage() {
           form.set('file', file);
           form.set('id', id);
           form.set('title', title);
+          form.set('artist', artist);
+          form.set('ext', ext);
           form.set('duration', String(duration));
           await new Promise<void>((resolve, reject) => {
             const xhr = new XMLHttpRequest();
@@ -150,8 +190,59 @@ export default function LibraryPage() {
         setProgress(null);
       }
     },
-    [mode, refresh, uploading]
+    [mode, refresh]
   );
+
+  const handleFile = useCallback(
+    async (file: File) => {
+      setError(null);
+      if (uploading || pending) return;
+      const ext = fileExt(file.name);
+      if (!EXT_TYPES[ext]) {
+        setError('Unsupported format — use MP3, AAC, AIFF or WAV.');
+        return;
+      }
+      if (file.size > MAX_BYTES) {
+        setError('File is too large — 50 MB max.');
+        return;
+      }
+
+      setStatus('Reading track info…');
+      setUploading(true); // block double-drops while we inspect tags
+      const tags = await readTags(file);
+      setUploading(false);
+      setStatus(null);
+
+      if (tags.title && tags.artist) {
+        await doUpload(file, ext, tags.title, tags.artist);
+      } else {
+        // Missing embedded info — ask the player to fill it in.
+        setPending({
+          file,
+          ext,
+          title: tags.title ?? fileStem(file.name),
+          artist: tags.artist ?? '',
+        });
+      }
+    },
+    [doUpload, pending, uploading]
+  );
+
+  const submitPending = useCallback(() => {
+    if (!pending) return;
+    const title = pending.title.trim() || fileStem(pending.file.name);
+    const artist = pending.artist.trim() || 'Unknown Artist';
+    const { file, ext } = pending;
+    setPending(null);
+    void doUpload(file, ext, title, artist);
+  }, [doUpload, pending]);
+
+  const playRandom = useCallback(() => {
+    const pool = songs ?? [];
+    if (pool.length === 0) return;
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    router.push(`/play/${pick.id}`);
+  }, [router, songs]);
 
   const onDrop = useCallback(
     (e: React.DragEvent) => {
@@ -167,12 +258,12 @@ export default function LibraryPage() {
     <main className="shell">
       <h1 className="logo">MusicMasher</h1>
       <p className="tagline">
-        Drop an MP3 → get a beat-synced tile game. Songs are shared with everyone.
+        Drop a song → get a beat-synced tile game. Songs are shared with everyone.
       </p>
 
       <div
         className={`dropzone${drag ? ' drag' : ''}`}
-        onClick={() => !uploading && fileInput.current?.click()}
+        onClick={() => !uploading && !pending && fileInput.current?.click()}
         onDragOver={(e) => {
           e.preventDefault();
           setDrag(true);
@@ -180,11 +271,11 @@ export default function LibraryPage() {
         onDragLeave={() => setDrag(false)}
         onDrop={onDrop}
         role="button"
-        aria-label="Upload an MP3"
+        aria-label="Upload a song"
       >
         <span className="dz-icon">🎵</span>
-        <h2>{uploading ? 'Uploading your track…' : 'Drop an MP3 here'}</h2>
-        <p>or tap to browse — max 25 MB</p>
+        <h2>{uploading ? 'Working on your track…' : 'Drop a song here'}</h2>
+        <p>MP3 · AAC · AIFF · WAV — or tap to browse, max 50 MB</p>
         {status && !error && (
           <div className="upload-status">
             {status}
@@ -203,7 +294,7 @@ export default function LibraryPage() {
         <input
           ref={fileInput}
           type="file"
-          accept=".mp3,audio/mpeg"
+          accept={ACCEPT}
           hidden
           onChange={(e) => {
             const f = e.target.files?.[0];
@@ -213,7 +304,14 @@ export default function LibraryPage() {
         />
       </div>
 
-      <div className="section-title">Song library</div>
+      <div className="library-head">
+        <div className="section-title">Song library</div>
+        {(songs?.length ?? 0) > 0 && (
+          <button className="random-btn" onClick={playRandom}>
+            🎲 Random
+          </button>
+        )}
+      </div>
       <div className="song-list">
         <SongCard
           title={DEMO_SONG.title}
@@ -226,7 +324,13 @@ export default function LibraryPage() {
           <SongCard
             key={s.id}
             title={s.title}
-            sub={`${formatDuration(s.duration)} · ${new Date(s.createdAt).toLocaleDateString()}`}
+            sub={[
+              s.artist,
+              formatDuration(s.duration),
+              new Date(s.createdAt).toLocaleDateString(),
+            ]
+              .filter(Boolean)
+              .join(' · ')}
             href={`/play/${s.id}`}
             icon="🎧"
           />
@@ -244,6 +348,56 @@ export default function LibraryPage() {
         Desktop: <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> or <kbd>J</kbd>{' '}
         <kbd>K</kbd> <kbd>L</kbd> or arrow keys · <kbd>Esc</kbd> to pause
       </div>
+
+      {pending && (
+        <div className="modal-backdrop">
+          <div className="modal">
+            <h2>Track details</h2>
+            <p className="modal-sub">
+              This file doesn&apos;t have complete track info embedded — fill it
+              in so everyone knows what they&apos;re playing.
+            </p>
+            <label className="field">
+              <span>Track name</span>
+              <input
+                type="text"
+                value={pending.title}
+                maxLength={80}
+                autoFocus
+                onChange={(e) =>
+                  setPending((p) => (p ? { ...p, title: e.target.value } : p))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitPending();
+                }}
+              />
+            </label>
+            <label className="field">
+              <span>Artist</span>
+              <input
+                type="text"
+                value={pending.artist}
+                maxLength={80}
+                placeholder="Unknown Artist"
+                onChange={(e) =>
+                  setPending((p) => (p ? { ...p, artist: e.target.value } : p))
+                }
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') submitPending();
+                }}
+              />
+            </label>
+            <div className="modal-actions">
+              <button className="ghost-btn" onClick={() => setPending(null)}>
+                Cancel
+              </button>
+              <button className="big-btn modal-cta" onClick={submitPending}>
+                Upload
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

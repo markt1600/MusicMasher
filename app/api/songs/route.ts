@@ -5,6 +5,7 @@ import {
   sanitizeTitle,
   storageMode,
   isValidSongId,
+  isValidExt,
   MAX_SONG_BYTES,
 } from '@/lib/storage';
 
@@ -39,6 +40,8 @@ export async function POST(request: Request) {
     const file = form.get('file');
     const id = String(form.get('id') ?? '');
     const title = sanitizeTitle(String(form.get('title') ?? ''));
+    const artist = sanitizeTitle(String(form.get('artist') ?? ''), '');
+    const ext = String(form.get('ext') ?? '').toLowerCase();
     const duration = Number(form.get('duration') ?? 0);
 
     if (!(file instanceof File)) {
@@ -47,8 +50,14 @@ export async function POST(request: Request) {
     if (!isValidSongId(id)) {
       return NextResponse.json({ error: 'Invalid song id' }, { status: 400 });
     }
+    if (!isValidExt(ext)) {
+      return NextResponse.json(
+        { error: 'Unsupported format — use MP3, AAC, AIFF or WAV' },
+        { status: 400 }
+      );
+    }
     if (file.size > MAX_SONG_BYTES) {
-      return NextResponse.json({ error: 'File too large (25 MB max)' }, { status: 413 });
+      return NextResponse.json({ error: 'File too large (50 MB max)' }, { status: 413 });
     }
     if (!Number.isFinite(duration) || duration <= 0 || duration > 60 * 20) {
       return NextResponse.json({ error: 'Invalid duration' }, { status: 400 });
@@ -59,6 +68,8 @@ export async function POST(request: Request) {
       {
         id,
         title,
+        artist,
+        ext,
         duration: Math.round(duration * 100) / 100,
         size: bytes.length,
         createdAt: new Date().toISOString(),

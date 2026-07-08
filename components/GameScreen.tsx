@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { analyzeAudio } from '@/lib/analyze';
+import { decodeAudio } from '@/lib/aiff';
 import { DEMO_SONG, renderDemoSong } from '@/lib/demo-song';
 import { Engine } from '@/lib/game/engine';
 import type { Beatmap, GameStats } from '@/lib/types';
@@ -67,7 +68,9 @@ export default function GameScreen({ songId }: { songId: string }) {
           const metaRes = await fetch(`/api/songs/${songId}`);
           if (!metaRes.ok) throw new Error('Song not found.');
           const { song } = await metaRes.json();
-          songTitle = song.title as string;
+          songTitle = song.artist
+            ? `${song.title} — ${song.artist}`
+            : (song.title as string);
           setTitle(songTitle);
 
           setLoadingMsg('Downloading audio…');
@@ -77,7 +80,7 @@ export default function GameScreen({ songId }: { songId: string }) {
           if (cancelled) return;
 
           setLoadingMsg('Decoding audio…');
-          buffer = await audioCtx.decodeAudioData(data);
+          buffer = await decodeAudio(data, audioCtx);
         }
         if (cancelled) return;
 

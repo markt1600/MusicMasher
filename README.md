@@ -1,16 +1,21 @@
 # 🎵 MusicMasher
 
-A beat-synced, pseudo-3D tile rhythm game for the web. Drop in **any MP3** —
-it's stored server-side so everyone can play it — and MusicMasher analyzes the
-audio and generates a tap chart synced to the music. Tiles rush down a neon
-highway toward you; tap the three lanes as they cross the line. The chart gets
-denser, faster, and starts throwing two-tile chords as the song builds.
+A beat-synced, pseudo-3D tile rhythm game for the web. Drop in a song —
+**MP3, AAC (.aac/.m4a), AIFF, or WAV** — it's stored server-side so everyone
+can play it, and MusicMasher analyzes the audio and generates a tap chart
+synced to the music. Tiles rush down a neon highway toward you; tap the three
+lanes as they cross the line. The chart gets denser, faster, and starts
+throwing two-tile chords as the song builds. Pick any song from the shared
+library, or hit **🎲 Random** to let the game choose.
 
 Built for mobile touch screens first, with full desktop keyboard support.
 
 ## How it works
 
-- **Uploads** — MP3s are uploaded directly from the browser to
+- **Track info** — embedded tags (ID3, MP4 atoms, RIFF INFO, AIFF chunks) are
+  read in the browser at upload time via `music-metadata`. If the file doesn't
+  carry a track name and artist, the uploader is prompted to fill them in.
+- **Uploads** — audio files are uploaded directly from the browser to
   [Vercel Blob](https://vercel.com/docs/storage/vercel-blob) (bypassing the
   4.5 MB serverless body limit), and a small `meta.json` is registered per
   song to build the shared library. In local dev without a Blob token, files
@@ -67,5 +72,6 @@ piece of setup.
 
 ## Notes
 
-- Max upload: 25 MB / 20 minutes, MP3 only.
+- Max upload: 50 MB / 20 minutes; MP3, AAC, AIFF, or WAV. Files are validated
+  by actually decoding them in the uploader's browser.
 - Everything uploaded is public to all players by design.

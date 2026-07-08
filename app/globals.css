@@ -130,13 +130,39 @@ button {
   transition: width 0.2s;
 }
 
+.library-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
 .section-title {
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 2.5px;
   text-transform: uppercase;
   color: var(--muted);
-  margin-bottom: 14px;
+}
+
+.random-btn {
+  padding: 8px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--text);
+  border: 1px solid rgba(180, 77, 255, 0.45);
+  background: linear-gradient(120deg, rgba(180, 77, 255, 0.18), rgba(255, 77, 210, 0.14));
+  box-shadow: 0 0 16px rgba(180, 77, 255, 0.18);
+  transition: transform 0.12s, box-shadow 0.15s;
+}
+
+.random-btn:hover {
+  box-shadow: 0 0 24px rgba(180, 77, 255, 0.35);
+}
+
+.random-btn:active {
+  transform: scale(0.95);
 }
 
 .song-list {
@@ -401,4 +427,86 @@ button {
   font-variant-numeric: tabular-nums;
   color: var(--neon);
   font-weight: 700;
+}
+
+/* ---------- Track details modal ---------- */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(4, 1, 15, 0.75);
+  backdrop-filter: blur(6px);
+  -webkit-backdrop-filter: blur(6px);
+}
+
+.modal {
+  width: 100%;
+  max-width: 380px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  background: linear-gradient(170deg, #140a38, #0a0524);
+  box-shadow: 0 12px 60px rgba(0, 0, 0, 0.6), 0 0 40px rgba(55, 245, 228, 0.08);
+  padding: 22px 20px;
+}
+
+.modal h2 {
+  font-size: 19px;
+  font-weight: 800;
+  margin-bottom: 6px;
+}
+
+.modal-sub {
+  color: var(--muted);
+  font-size: 12.5px;
+  line-height: 1.5;
+  margin-bottom: 16px;
+}
+
+.field {
+  display: block;
+  margin-bottom: 14px;
+}
+
+.field span {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: 6px;
+}
+
+.field input {
+  width: 100%;
+  padding: 11px 13px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font: inherit;
+  font-size: 15px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.field input:focus {
+  border-color: var(--neon);
+  box-shadow: 0 0 0 3px rgba(55, 245, 228, 0.15);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.modal-cta {
+  padding: 11px 30px;
+  font-size: 14px;
 }

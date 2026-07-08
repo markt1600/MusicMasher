@@ -3,8 +3,22 @@ import path from 'path';
 import { list, put } from '@vercel/blob';
 import type { SongMeta } from './types';
 
-export const MAX_SONG_BYTES = 25 * 1024 * 1024; // 25 MB
+export const MAX_SONG_BYTES = 50 * 1024 * 1024; // 50 MB (WAV/AIFF are uncompressed)
 export const MAX_TITLE_LENGTH = 80;
+
+/** Supported upload formats and the content types they're served with. */
+export const AUDIO_TYPES: Record<string, string> = {
+  mp3: 'audio/mpeg',
+  aac: 'audio/aac',
+  m4a: 'audio/mp4',
+  aiff: 'audio/aiff',
+  aif: 'audio/aiff',
+  wav: 'audio/wav',
+};
+
+export function isValidExt(ext: string): boolean {
+  return Object.prototype.hasOwnProperty.call(AUDIO_TYPES, ext);
+}
 
 export type StorageMode = 'blob' | 'local';
 
@@ -14,9 +28,9 @@ export function storageMode(): StorageMode {
 
 const LOCAL_DIR = path.join(process.cwd(), '.data', 'songs');
 
-export function sanitizeTitle(raw: string): string {
+export function sanitizeTitle(raw: string, fallback = 'Untitled'): string {
   const cleaned = raw.replace(/[\u0000-\u001f<>]/g, '').trim();
-  return (cleaned || 'Untitled').slice(0, MAX_TITLE_LENGTH);
+  return (cleaned || fallback).slice(0, MAX_TITLE_LENGTH);
 }
 
 export function isValidSongId(id: string): boolean {
@@ -117,13 +131,14 @@ export async function registerBlobSong(meta: SongMeta): Promise<void> {
   });
 }
 
-/** Local mode: persist the MP3 bytes and metadata to disk. */
+/** Local mode: persist the audio bytes and metadata to disk. */
 export async function saveLocalSong(
   meta: Omit<SongMeta, 'audioUrl'>,
   bytes: Buffer
 ): Promise<SongMeta> {
+  const ext = meta.ext && isValidExt(meta.ext) ? meta.ext : 'mp3';
   await fs.mkdir(LOCAL_DIR, { recursive: true });
-  await fs.writeFile(path.join(LOCAL_DIR, `${meta.id}.mp3`), bytes);
+  await fs.writeFile(path.join(LOCAL_DIR, `${meta.id}.${ext}`), bytes);
   const full: SongMeta = { ...meta, audioUrl: `/api/songs/${meta.id}/audio` };
   await fs.writeFile(
     path.join(LOCAL_DIR, `${meta.id}.json`),
@@ -132,10 +147,13 @@ export async function saveLocalSong(
   return full;
 }
 
-export async function readLocalAudio(id: string): Promise<Buffer | null> {
-  if (!isValidSongId(id)) return null;
+export async function readLocalAudio(
+  id: string,
+  ext: string
+): Promise<Buffer | null> {
+  if (!isValidSongId(id) || !isValidExt(ext)) return null;
   try {
-    return await fs.readFile(path.join(LOCAL_DIR, `${id}.mp3`));
+    return await fs.readFile(path.join(LOCAL_DIR, `${id}.${ext}`));
   } catch {
     return null;
   }

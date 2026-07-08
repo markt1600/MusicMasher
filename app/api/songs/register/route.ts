@@ -4,6 +4,7 @@ import {
   sanitizeTitle,
   storageMode,
   isValidSongId,
+  isValidExt,
   MAX_SONG_BYTES,
 } from '@/lib/storage';
 import type { SongMeta } from '@/lib/types';
@@ -25,11 +26,15 @@ export async function POST(request: Request) {
     const body = (await request.json()) as Partial<SongMeta>;
     const id = String(body.id ?? '');
     const audioUrl = String(body.audioUrl ?? '');
+    const ext = String(body.ext ?? '').toLowerCase();
     const duration = Number(body.duration ?? 0);
     const size = Number(body.size ?? 0);
 
     if (!isValidSongId(id)) {
       return NextResponse.json({ error: 'Invalid song id' }, { status: 400 });
+    }
+    if (!isValidExt(ext)) {
+      return NextResponse.json({ error: 'Unsupported format' }, { status: 400 });
     }
     // The audio URL must be a Vercel Blob URL for this song's path — prevents
     // registering arbitrary third-party URLs.
@@ -42,7 +47,7 @@ export async function POST(request: Request) {
     if (
       url.protocol !== 'https:' ||
       !url.hostname.endsWith('.public.blob.vercel-storage.com') ||
-      !url.pathname.startsWith(`/songs/${id}/audio`)
+      url.pathname !== `/songs/${id}/audio.${ext}`
     ) {
       return NextResponse.json({ error: 'Invalid audio URL' }, { status: 400 });
     }
@@ -56,6 +61,8 @@ export async function POST(request: Request) {
     const meta: SongMeta = {
       id,
       title: sanitizeTitle(String(body.title ?? '')),
+      artist: sanitizeTitle(String(body.artist ?? ''), ''),
+      ext,
       duration: Math.round(duration * 100) / 100,
       audioUrl,
       size: Math.round(size),

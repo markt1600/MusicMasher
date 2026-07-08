@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { handleUpload, type HandleUploadBody } from '@vercel/blob/client';
-import { storageMode, MAX_SONG_BYTES } from '@/lib/storage';
+import { storageMode, AUDIO_TYPES, MAX_SONG_BYTES } from '@/lib/storage';
 
 export const dynamic = 'force-dynamic';
 
@@ -22,11 +22,11 @@ export async function POST(request: Request) {
       body,
       request,
       onBeforeGenerateToken: async (pathname) => {
-        if (!/^songs\/[a-z0-9]{8,32}\/audio\.mp3$/.test(pathname)) {
+        if (!/^songs\/[a-z0-9]{8,32}\/audio\.(mp3|aac|m4a|aiff|aif|wav)$/.test(pathname)) {
           throw new Error('Invalid upload path');
         }
         return {
-          allowedContentTypes: ['audio/mpeg', 'audio/mp3'],
+          allowedContentTypes: [...new Set(Object.values(AUDIO_TYPES))],
           maximumSizeInBytes: MAX_SONG_BYTES,
           addRandomSuffix: false,
         };
