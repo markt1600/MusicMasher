@@ -1,153 +1,138 @@
 /**
- * Procedurally synthesized demo track ("Neon Dreams") rendered with an
- * OfflineAudioContext, so the game is playable with zero uploads and no
- * bundled (copyrighted) audio files. The arrangement deliberately builds in
+ * Procedurally synthesized demo track ("Neon Dreams"), so the game is
+ * playable with zero uploads and no bundled (copyrighted) audio files.
+ *
+ * Samples are computed directly in JavaScript rather than rendered through
+ * an OfflineAudioContext graph: offline rendering has cross-browser quirks
+ * that can hang forever with no error, while plain math runs identically
+ * everywhere. It's also fully deterministic (seeded noise), so every player
+ * hears the same render and gets the same chart. The arrangement builds in
  * intensity so the difficulty ramp is easy to feel.
  */
+
+const SR = 44100;
+const BPM = 122;
+const BEAT = 60 / BPM;
+const BARS = 48; // 4 beats per bar ≈ 94.4 s
+const TAU = Math.PI * 2;
 
 export const DEMO_SONG = {
   id: 'demo',
   title: 'Neon Dreams (Demo)',
-  duration: 96,
+  duration: Math.round(BARS * 4 * BEAT + 2),
 };
-
-const BPM = 122;
-const BEAT = 60 / BPM;
-const BARS = 48; // 4 beats per bar ≈ 94.4 s
-const SR = 44100;
 
 // A minor progression: Am, F, C, G (roots per bar)
 const BASS_ROOTS = [110.0, 87.31, 130.81, 98.0]; // A2 F2 C3 G2
 // A minor pentatonic pool for the lead arp
 const PENTA = [440.0, 523.25, 587.33, 659.25, 783.99, 880.0];
 
-export async function renderDemoSong(): Promise<AudioBuffer> {
+function mulberry32(seed: number) {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Rendered once per page session — replays and revisits are instant.
+let demoCache: AudioBuffer | null = null;
+
+export async function getDemoSong(
+  ctx: BaseAudioContext,
+  onProgress?: (p: number) => void
+): Promise<AudioBuffer> {
+  if (!demoCache) demoCache = await renderDemoSong(ctx, onProgress);
+  return demoCache;
+}
+
+export async function renderDemoSong(
+  ctx: BaseAudioContext,
+  onProgress?: (p: number) => void
+): Promise<AudioBuffer> {
   const duration = BARS * 4 * BEAT + 2;
-  const ctx = new OfflineAudioContext(2, Math.ceil(SR * duration), SR);
+  const N = Math.ceil(SR * duration);
+  const mix = new Float32Array(N);
+  const leadBus = new Float32Array(N); // lead goes through an echo pass
+  const rng = mulberry32(0xc0ffee);
 
-  const master = ctx.createGain();
-  master.gain.value = 0.75;
-  const comp = ctx.createDynamicsCompressor();
-  comp.threshold.value = -14;
-  comp.ratio.value = 4;
-  master.connect(comp);
-  comp.connect(ctx.destination);
-
-  // Shared noise buffer for drums
-  const noiseBuf = ctx.createBuffer(1, SR, SR);
-  const nd = noiseBuf.getChannelData(0);
-  for (let i = 0; i < nd.length; i++) nd[i] = Math.random() * 2 - 1;
-
-  // Echo bus for the lead
-  const echo = ctx.createDelay(1);
-  echo.delayTime.value = BEAT * 0.75;
-  const echoFb = ctx.createGain();
-  echoFb.gain.value = 0.3;
-  const echoWet = ctx.createGain();
-  echoWet.gain.value = 0.22;
-  echo.connect(echoFb);
-  echoFb.connect(echo);
-  echo.connect(echoWet);
-  echoWet.connect(master);
-
-  const kick = (t: number, level = 1) => {
-    const osc = ctx.createOscillator();
-    const g = ctx.createGain();
-    osc.frequency.setValueAtTime(150, t);
-    osc.frequency.exponentialRampToValueAtTime(42, t + 0.11);
-    g.gain.setValueAtTime(0.9 * level, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.26);
-    osc.connect(g);
-    g.connect(master);
-    osc.start(t);
-    osc.stop(t + 0.3);
-  };
-
-  const hat = (t: number, open = false, level = 1) => {
-    const src = ctx.createBufferSource();
-    src.buffer = noiseBuf;
-    const hp = ctx.createBiquadFilter();
-    hp.type = 'highpass';
-    hp.frequency.value = 7500;
-    const g = ctx.createGain();
-    const dur = open ? 0.14 : 0.04;
-    g.gain.setValueAtTime(0.22 * level, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    src.connect(hp);
-    hp.connect(g);
-    g.connect(master);
-    src.start(t, Math.random(), dur + 0.05);
-  };
-
-  const snare = (t: number, level = 1) => {
-    const src = ctx.createBufferSource();
-    src.buffer = noiseBuf;
-    const bp = ctx.createBiquadFilter();
-    bp.type = 'bandpass';
-    bp.frequency.value = 1900;
-    bp.Q.value = 0.8;
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.5 * level, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.16);
-    src.connect(bp);
-    bp.connect(g);
-    g.connect(master);
-    src.start(t, Math.random(), 0.2);
-
-    const osc = ctx.createOscillator();
-    osc.type = 'triangle';
-    osc.frequency.value = 185;
-    const og = ctx.createGain();
-    og.gain.setValueAtTime(0.25 * level, t);
-    og.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
-    osc.connect(og);
-    og.connect(master);
-    osc.start(t);
-    osc.stop(t + 0.1);
-  };
-
-  const bass = (t: number, freq: number, dur: number, level = 1) => {
-    const osc = ctx.createOscillator();
-    osc.type = 'sawtooth';
-    osc.frequency.value = freq;
-    const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass';
-    lp.frequency.setValueAtTime(90, t);
-    lp.frequency.exponentialRampToValueAtTime(600, t + 0.05);
-    lp.frequency.exponentialRampToValueAtTime(120, t + dur);
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.28 * level, t);
-    g.gain.setValueAtTime(0.28 * level, t + dur - 0.05);
-    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    osc.connect(lp);
-    lp.connect(g);
-    g.connect(master);
-    osc.start(t);
-    osc.stop(t + dur + 0.05);
-  };
-
-  const lead = (t: number, freq: number, dur: number, level = 1) => {
-    const g = ctx.createGain();
-    g.gain.setValueAtTime(0.11 * level, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
-    const lp = ctx.createBiquadFilter();
-    lp.type = 'lowpass';
-    lp.frequency.value = 3200;
-    for (const detune of [-6, 6]) {
-      const osc = ctx.createOscillator();
-      osc.type = 'square';
-      osc.frequency.value = freq;
-      osc.detune.value = detune;
-      osc.connect(lp);
-      osc.start(t);
-      osc.stop(t + dur + 0.05);
+  const kick = (at: number, level = 1) => {
+    const start = Math.floor(at * SR);
+    const len = Math.floor(0.3 * SR);
+    let phase = 0;
+    for (let i = 0; i < len && start + i < N; i++) {
+      const t = i / SR;
+      const f = 42 + 110 * Math.exp(-t * 12); // 150 Hz dropping to 42 Hz
+      phase += (TAU * f) / SR;
+      mix[start + i] += Math.sin(phase) * 0.85 * level * Math.exp(-t * 13);
     }
-    lp.connect(g);
-    g.connect(master);
-    g.connect(echo);
   };
 
-  // --- arrangement -----------------------------------------------------------
+  const hat = (at: number, open = false, level = 1) => {
+    const start = Math.floor(at * SR);
+    const len = Math.floor((open ? 0.15 : 0.05) * SR);
+    let prev = 0;
+    for (let i = 0; i < len && start + i < N; i++) {
+      const t = i / SR;
+      const w = rng() * 2 - 1;
+      // differentiated noise ≈ highpassed hiss
+      mix[start + i] += (w - prev) * 0.3 * level * Math.exp(-t * (open ? 28 : 85));
+      prev = w;
+    }
+  };
+
+  const snare = (at: number, level = 1) => {
+    const start = Math.floor(at * SR);
+    const len = Math.floor(0.2 * SR);
+    for (let i = 0; i < len && start + i < N; i++) {
+      const t = i / SR;
+      const w = rng() * 2 - 1;
+      // noise ring-modulated toward ~1.9 kHz (bandpass-ish) + 185 Hz body
+      mix[start + i] +=
+        (w * Math.sin(TAU * 1900 * t) * 0.8 + w * 0.25) * 0.5 * level * Math.exp(-t * 26) +
+        Math.sin(TAU * 185 * t) * 0.28 * level * Math.exp(-t * 45);
+    }
+  };
+
+  const bass = (at: number, freq: number, dur: number, level = 1) => {
+    const start = Math.floor(at * SR);
+    const len = Math.floor((dur + 0.03) * SR);
+    // lowpassed saw: first 5 harmonics rolled off above ~500 Hz
+    const amps: number[] = [];
+    for (let k = 1; k <= 5; k++) {
+      amps.push(1 / k / (1 + ((k * freq) / 500) ** 2));
+    }
+    for (let i = 0; i < len && start + i < N; i++) {
+      const t = i / SR;
+      const attack = Math.min(1, t * 200);
+      const release = t > dur - 0.05 ? Math.max(0, (dur + 0.03 - t) / 0.08) : 1;
+      let s = 0;
+      for (let k = 1; k <= 5; k++) s += amps[k - 1] * Math.sin(TAU * k * freq * t);
+      mix[start + i] += s * 0.38 * level * attack * release;
+    }
+  };
+
+  const lead = (at: number, freq: number, dur: number, level = 1) => {
+    const start = Math.floor(at * SR);
+    const len = Math.floor((dur + 0.05) * SR);
+    const decay = Math.log(120) / (dur + 0.05);
+    for (let i = 0; i < len && start + i < N; i++) {
+      const t = i / SR;
+      const env = Math.exp(-t * decay) * Math.min(1, t * 400);
+      let s = 0;
+      for (const detune of [0.9965, 1.0035]) {
+        const x = TAU * freq * detune * t;
+        // square-ish: odd harmonics
+        s += Math.sin(x) + 0.33 * Math.sin(3 * x) + 0.2 * Math.sin(5 * x);
+      }
+      leadBus[start + i] += s * 0.065 * level * env;
+    }
+  };
+
+  // --- arrangement (identical structure to the original graph version) -----
   let arpStep = 0;
   for (let bar = 0; bar < BARS; bar++) {
     const t0 = 0.5 + bar * 4 * BEAT;
@@ -196,7 +181,22 @@ export async function renderDemoSong(): Promise<AudioBuffer> {
         snare(t0 + 3 * BEAT + (s * BEAT) / 4, 0.5 + s * 0.12);
       }
     }
+
+    if ((bar & 3) === 3) {
+      onProgress?.(bar / BARS);
+      await new Promise<void>((r) => setTimeout(r, 0)); // keep the UI alive
+    }
   }
 
-  return ctx.startRendering();
+  // --- echo on the lead bus, then mixdown with a soft clip ------------------
+  const d = Math.floor(BEAT * 0.75 * SR);
+  for (let i = d; i < N; i++) leadBus[i] += leadBus[i - d] * 0.32;
+  for (let i = 0; i < N; i++) {
+    mix[i] = Math.tanh((mix[i] + leadBus[i]) * 1.15) * 0.92;
+  }
+  onProgress?.(1);
+
+  const buffer = ctx.createBuffer(1, N, SR);
+  buffer.getChannelData(0).set(mix);
+  return buffer;
 }

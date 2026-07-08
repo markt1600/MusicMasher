@@ -4,13 +4,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { analyzeAudio } from '@/lib/analyze';
 import { decodeAudio } from '@/lib/aiff';
-import { DEMO_SONG, renderDemoSong } from '@/lib/demo-song';
+import { DEMO_SONG, getDemoSong } from '@/lib/demo-song';
 import { Engine } from '@/lib/game/engine';
 import type { Beatmap, GameStats } from '@/lib/types';
 
 type Phase = 'loading' | 'ready' | 'playing' | 'paused' | 'results' | 'error';
 
 const OFFSET_KEY = 'mm-offset-ms';
+
+// The demo chart never changes — analyze it once per page session.
+let demoMapCache: Beatmap | null = null;
 
 function grade(stats: GameStats): string {
   if (stats.totalNotes === 0) return 'S';
@@ -62,7 +65,11 @@ export default function GameScreen({ songId }: { songId: string }) {
           songTitle = DEMO_SONG.title;
           setTitle(songTitle);
           setLoadingMsg('Synthesizing demo track…');
-          buffer = await renderDemoSong();
+          setAnalyzePct(0);
+          buffer = await getDemoSong(audioCtx, (p) => {
+            if (!cancelled) setAnalyzePct(Math.round(p * 100));
+          });
+          setAnalyzePct(null);
         } else {
           setLoadingMsg('Loading song…');
           const metaRes = await fetch(`/api/songs/${songId}`);
@@ -84,15 +91,21 @@ export default function GameScreen({ songId }: { songId: string }) {
         }
         if (cancelled) return;
 
-        setLoadingMsg('Analyzing beats…');
-        setAnalyzePct(0);
-        const map = await analyzeAudio(buffer, (p) => {
-          if (!cancelled) setAnalyzePct(Math.round(p * 100));
-        });
+        let map: Beatmap;
+        if (songId === 'demo' && demoMapCache) {
+          map = demoMapCache;
+        } else {
+          setLoadingMsg('Analyzing beats…');
+          setAnalyzePct(0);
+          map = await analyzeAudio(buffer, (p) => {
+            if (!cancelled) setAnalyzePct(Math.round(p * 100));
+          });
+        }
         if (cancelled) return;
         if (map.notes.length === 0) {
           throw new Error("Couldn't find a beat in this song.");
         }
+        if (songId === 'demo') demoMapCache = map;
 
         bufferRef.current = buffer;
         beatmapRef.current = map;
@@ -197,6 +210,16 @@ export default function GameScreen({ songId }: { songId: string }) {
               </>
             )}
           </p>
+          {analyzePct != null && (
+            <div className="load-bar">
+              <div className="progress-track">
+                <div
+                  className="progress-fill"
+                  style={{ width: `${analyzePct}%` }}
+                />
+              </div>
+            </div>
+          )}
         </div>
       )}
 
