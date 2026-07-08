@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { upload } from '@vercel/blob/client';
+import { uploadPresigned } from '@vercel/blob/client';
 import type { SongMeta } from '@/lib/types';
 import { DEMO_SONG } from '@/lib/demo-song';
 import { decodeAudio } from '@/lib/aiff';
@@ -177,7 +177,7 @@ export default function LibraryPage() {
         setStatus('Uploading…');
 
         if (mode === 'blob') {
-          const blob = await upload(`songs/${id}/audio.${ext}`, file, {
+          const blob = await uploadPresigned(`songs/${id}/audio.${ext}`, file, {
             access: 'public',
             handleUploadUrl: '/api/songs/upload',
             contentType: EXT_TYPES[ext],

@@ -23,7 +23,12 @@ export function isValidExt(ext: string): boolean {
 export type StorageMode = 'blob' | 'local';
 
 export function storageMode(): StorageMode {
-  return process.env.BLOB_READ_WRITE_TOKEN ? 'blob' : 'local';
+  // Classic stores inject a static BLOB_READ_WRITE_TOKEN; newer stores use
+  // OIDC and inject BLOB_STORE_ID instead (the runtime provides
+  // VERCEL_OIDC_TOKEN). The SDK handles either automatically.
+  return process.env.BLOB_READ_WRITE_TOKEN || process.env.BLOB_STORE_ID
+    ? 'blob'
+    : 'local';
 }
 
 const LOCAL_DIR = path.join(process.cwd(), '.data', 'songs');
