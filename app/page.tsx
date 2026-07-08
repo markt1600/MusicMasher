@@ -51,6 +51,53 @@ function fileExt(name: string): string {
   return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
 }
 
+const MIME_TO_EXT: Record<string, string> = {
+  'audio/mpeg': 'mp3',
+  'audio/mp3': 'mp3',
+  'audio/aac': 'aac',
+  'audio/aacp': 'aac',
+  'audio/mp4': 'm4a',
+  'audio/x-m4a': 'm4a',
+  'audio/m4a': 'm4a',
+  'audio/aiff': 'aiff',
+  'audio/x-aiff': 'aiff',
+  'audio/wav': 'wav',
+  'audio/x-wav': 'wav',
+  'audio/wave': 'wav',
+  'audio/vnd.wave': 'wav',
+};
+
+/**
+ * Work out the audio format from the extension, the browser-reported MIME
+ * type, or the file's magic bytes — many real-world files (music apps,
+ * downloads, mobile pickers) have missing or misleading names.
+ */
+async function detectFormat(file: File): Promise<string | null> {
+  const ext = fileExt(file.name);
+  if (EXT_TYPES[ext]) return ext === 'aif' ? 'aiff' : ext;
+
+  const mime = (file.type || '').toLowerCase().split(';')[0].trim();
+  if (MIME_TO_EXT[mime]) return MIME_TO_EXT[mime];
+
+  try {
+    const head = new Uint8Array(await file.slice(0, 16).arrayBuffer());
+    if (head.length < 12) return null;
+    const tag = (o: number, n: number) =>
+      String.fromCharCode(...head.subarray(o, o + n));
+    if (tag(0, 3) === 'ID3') return 'mp3';
+    if (tag(0, 4) === 'RIFF' && tag(8, 4) === 'WAVE') return 'wav';
+    if (tag(0, 4) === 'FORM' && ['AIFF', 'AIFC'].includes(tag(8, 4))) return 'aiff';
+    if (tag(4, 4) === 'ftyp') return 'm4a';
+    // ADTS AAC sync (0xFFF0/0xFFF1/0xFFF8/0xFFF9) — check before generic MPEG
+    if (head[0] === 0xff && (head[1] & 0xf6) === 0xf0) return 'aac';
+    // Bare MPEG audio frame sync (MP3 without an ID3 tag)
+    if (head[0] === 0xff && (head[1] & 0xe0) === 0xe0) return 'mp3';
+  } catch {
+    // unreadable — fall through
+  }
+  return null;
+}
+
 function fileStem(name: string): string {
   const dot = name.lastIndexOf('.');
   return (dot > 0 ? name.slice(0, dot) : name).slice(0, 80);
@@ -197,9 +244,10 @@ export default function LibraryPage() {
     async (file: File) => {
       setError(null);
       if (uploading || pending) return;
-      const ext = fileExt(file.name);
-      if (!EXT_TYPES[ext]) {
-        setError('Unsupported format — use MP3, AAC, AIFF or WAV.');
+      const ext = await detectFormat(file);
+      if (!ext) {
+        const detail = [file.name, file.type].filter(Boolean).join(', ');
+        setError(`Unsupported format (${detail}) — use MP3, AAC, AIFF or WAV.`);
         return;
       }
       if (file.size > MAX_BYTES) {
