@@ -11,11 +11,21 @@ import {
 
 export const dynamic = 'force-dynamic';
 
+/** True when uploads can actually be stored: blob configured, or not on
+ * Vercel (local dev writes to disk; Vercel's filesystem is read-only). */
+function uploadsEnabled(): boolean {
+  return storageMode() === 'blob' || !process.env.VERCEL;
+}
+
 /** GET /api/songs — list all uploaded songs. */
 export async function GET() {
   try {
     const songs = await listSongs();
-    return NextResponse.json({ songs, mode: storageMode() });
+    return NextResponse.json({
+      songs,
+      mode: storageMode(),
+      uploads: uploadsEnabled(),
+    });
   } catch (err) {
     console.error('listSongs failed', err);
     return NextResponse.json({ error: 'Failed to list songs' }, { status: 500 });
@@ -33,6 +43,15 @@ export async function POST(request: Request) {
     return NextResponse.json(
       { error: 'Use client upload in blob mode' },
       { status: 400 }
+    );
+  }
+  if (!uploadsEnabled()) {
+    return NextResponse.json(
+      {
+        error:
+          'Server storage is not configured — connect a Vercel Blob store to this project and redeploy.',
+      },
+      { status: 503 }
     );
   }
   try {

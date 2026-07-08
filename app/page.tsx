@@ -129,6 +129,7 @@ export default function LibraryPage() {
   const router = useRouter();
   const [songs, setSongs] = useState<SongMeta[] | null>(null);
   const [mode, setMode] = useState<'blob' | 'local'>('local');
+  const [uploadsEnabled, setUploadsEnabled] = useState(true);
   const [drag, setDrag] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [progress, setProgress] = useState<number | null>(null);
@@ -143,6 +144,7 @@ export default function LibraryPage() {
       const data = await res.json();
       setSongs(data.songs ?? []);
       if (data.mode) setMode(data.mode);
+      setUploadsEnabled(data.uploads !== false);
     } catch {
       setSongs([]);
     }
@@ -244,6 +246,12 @@ export default function LibraryPage() {
     async (file: File) => {
       setError(null);
       if (uploading || pending) return;
+      if (!uploadsEnabled) {
+        setError(
+          'Uploads are disabled: no storage is connected. In Vercel, add a Blob store (Storage → Create Database → Blob), connect it to this project, and redeploy.'
+        );
+        return;
+      }
       const ext = await detectFormat(file);
       if (!ext) {
         const detail = [file.name, file.type].filter(Boolean).join(', ');
@@ -273,7 +281,7 @@ export default function LibraryPage() {
         });
       }
     },
-    [doUpload, pending, uploading]
+    [doUpload, pending, uploading, uploadsEnabled]
   );
 
   const submitPending = useCallback(() => {
@@ -324,6 +332,13 @@ export default function LibraryPage() {
         <span className="dz-icon">🎵</span>
         <h2>{uploading ? 'Working on your track…' : 'Drop a song here'}</h2>
         <p>MP3 · AAC · AIFF · WAV — or tap to browse, max 50 MB</p>
+        {!uploadsEnabled && (
+          <div className="upload-status upload-error">
+            Uploads are disabled — no Blob store is connected to this
+            deployment. In Vercel: Storage → Create Database → Blob → Connect
+            to this project, then redeploy.
+          </div>
+        )}
         {status && !error && (
           <div className="upload-status">
             {status}
