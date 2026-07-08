@@ -154,9 +154,16 @@ export interface EngineOptions {
 }
 
 export interface EngineCallbacks {
-  onEnd: (stats: GameStats) => void;
+  /** failed = the player hit the miss-rate limit and the song was cut short. */
+  onEnd: (stats: GameStats, failed: boolean) => void;
   onPauseRequest: () => void;
 }
+
+// Survival: judged notes in the trailing window determine failure.
+const FAIL_WINDOW = 10; // seconds
+const FAIL_MISS_RATE = 0.7; // game over above this
+const DANGER_MISS_RATE = 0.3; // danger bar appears above this
+const FAIL_MIN_SAMPLES = 6; // don't judge survival on a couple of notes
 
 function easeInOut(x: number): number {
   return x < 0.5 ? 2 * x * x : 1 - (-2 * x + 2) ** 2 / 2;
@@ -207,6 +214,10 @@ export class Engine {
   private lastScoreAt = -10;
   private lastMilestoneAt = -10;
   private popups: { born: number; title: string; sub: string }[] = [];
+
+  // survival state
+  private recentJudged: { t: number; miss: boolean }[] = [];
+  private dangerLevel = 0; // 0 safe … 1 game over
 
   // effects
   private particles: Particle[] = [];
@@ -525,6 +536,7 @@ export class Engine {
     note.judged = j;
     note.judgedAt = performance.now();
     this.counts[j]++;
+    this.recentJudged.push({ t: this.songTime(), miss: j === 'miss' });
 
     if (j === 'miss') {
       this.combo = 0;
@@ -859,11 +871,38 @@ export class Engine {
       if (now - e.born > e.dur) this.skyEvents.splice(i, 1);
     }
 
+    // Survival: miss rate over the trailing window.
+    const windowStart = this.songTime() - FAIL_WINDOW;
+    while (this.recentJudged.length > 0 && this.recentJudged[0].t < windowStart) {
+      this.recentJudged.shift();
+    }
+    if (this.recentJudged.length >= FAIL_MIN_SAMPLES) {
+      const misses = this.recentJudged.reduce((s, r) => s + (r.miss ? 1 : 0), 0);
+      const rate = misses / this.recentJudged.length;
+      this.dangerLevel = Math.max(
+        0,
+        Math.min(1, (rate - DANGER_MISS_RATE) / (FAIL_MISS_RATE - DANGER_MISS_RATE))
+      );
+      if (rate > FAIL_MISS_RATE && !this.ended) {
+        this.ended = true;
+        cancelAnimationFrame(this.raf);
+        try {
+          this.source?.stop();
+        } catch {
+          // already stopped
+        }
+        this.cb.onEnd(this.stats(), true);
+        return;
+      }
+    } else {
+      this.dangerLevel = 0;
+    }
+
     // Song end.
     if (!this.ended && this.songTime() > this.map.duration + 0.6) {
       this.ended = true;
       cancelAnimationFrame(this.raf);
-      this.cb.onEnd(this.stats());
+      this.cb.onEnd(this.stats(), false);
     }
   }
 
@@ -2065,6 +2104,63 @@ export class Engine {
       g.globalAlpha = 0.6;
       g.font = `700 ${Math.round(11 * dpr)}px system-ui, sans-serif`;
       g.fillText('COMBO', w / 2, h * 0.3 + 16 * dpr);
+      g.restore();
+    }
+
+    // Danger zone: depleting countdown bar + heartbeat red vignette. The bar
+    // empties as the trailing miss rate climbs toward the fail limit.
+    if (this.dangerLevel > 0 && !this.ended) {
+      const remaining = 1 - this.dangerLevel;
+      const pulse = 0.6 + 0.4 * Math.sin(now / (140 - this.dangerLevel * 70));
+      const bw = w * 0.56;
+      const bh = 9 * dpr;
+      const bx = (w - bw) / 2;
+      const by = 78 * dpr;
+
+      g.save();
+      g.textAlign = 'center';
+      g.font = `900 ${Math.round(12 * dpr)}px ${COMIC_FONT}`;
+      g.lineJoin = 'round';
+      g.lineWidth = 4 * dpr;
+      g.strokeStyle = 'rgba(8, 5, 28, 0.9)';
+      g.globalAlpha = 0.75 + 0.25 * pulse;
+      g.strokeText('⚠ DANGER ⚠', w / 2, by - 6 * dpr);
+      g.fillStyle = '#ff5d7d';
+      g.fillText('⚠ DANGER ⚠', w / 2, by - 6 * dpr);
+      // track
+      g.globalAlpha = 1;
+      g.fillStyle = 'rgba(255, 93, 125, 0.18)';
+      g.strokeStyle = `rgba(255, 93, 125, ${0.5 + 0.5 * pulse})`;
+      g.lineWidth = 1.5 * dpr;
+      g.beginPath();
+      g.roundRect
+        ? g.roundRect(bx, by, bw, bh, bh / 2)
+        : g.rect(bx, by, bw, bh);
+      g.fill();
+      g.stroke();
+      // remaining life
+      if (remaining > 0.01) {
+        const fillW = Math.max(bh, bw * remaining);
+        const lg = g.createLinearGradient(bx, 0, bx + bw, 0);
+        lg.addColorStop(0, '#ffd76e');
+        lg.addColorStop(0.5, '#ff8a5d');
+        lg.addColorStop(1, '#ff3d5e');
+        g.fillStyle = lg;
+        g.beginPath();
+        g.roundRect
+          ? g.roundRect(bx, by, fillW, bh, bh / 2)
+          : g.rect(bx, by, fillW, bh);
+        g.fill();
+      }
+      g.restore();
+
+      // red heartbeat around the edges, harder as it gets worse
+      g.save();
+      const vig = g.createRadialGradient(w / 2, h / 2, h * 0.3, w / 2, h / 2, h * 0.75);
+      vig.addColorStop(0, 'rgba(0,0,0,0)');
+      vig.addColorStop(1, `rgba(255, 30, 70, ${(0.1 + 0.22 * this.dangerLevel) * pulse})`);
+      g.fillStyle = vig;
+      g.fillRect(0, 0, w, h);
       g.restore();
     }
 

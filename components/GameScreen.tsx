@@ -102,6 +102,7 @@ export default function GameScreen({
   const scorePosted = useRef(false);
   const [runTotal, setRunTotal] = useState(0);
   const [advancing, setAdvancing] = useState(false);
+  const [failed, setFailed] = useState(false);
 
   // ---------------------------------------------------------------------
   // Load: fetch (or synthesize) audio → decode → analyze beats
@@ -228,6 +229,8 @@ export default function GameScreen({
     scorePosted.current = false;
     setGlobalBest(null);
     setIsRecord(false);
+    setFailed(false);
+    setBestResult(null);
 
     // On touch devices, go fullscreen for the game (iOS Safari doesn't
     // support the Fullscreen API — it simply no-ops there).
@@ -252,11 +255,13 @@ export default function GameScreen({
       map,
       title,
       {
-        onEnd: (s) => {
+        onEnd: (s, didFail) => {
           setStats(s);
-          // Personal/global bests only count on normal difficulty — gauntlet
-          // charts are denser and faster, so scores aren't comparable.
-          if (difficulty === 1) {
+          setFailed(didFail);
+          // Personal/global bests only count for completed songs on normal
+          // difficulty — gauntlet charts are denser/faster, and a failed run
+          // is an incomplete song.
+          if (difficulty === 1 && !didFail) {
             setBestResult(
               submitScore(songId, {
                 score: s.score,
@@ -346,11 +351,12 @@ export default function GameScreen({
       stats &&
       player &&
       difficulty === 1 &&
+      !failed &&
       !scorePosted.current
     ) {
       void postScore(player, stats);
     }
-  }, [difficulty, phase, player, postScore, stats]);
+  }, [difficulty, failed, phase, player, postScore, stats]);
 
   const savePlayerName = useCallback(() => {
     const name = nameDraft.trim().slice(0, 16);
@@ -385,6 +391,7 @@ export default function GameScreen({
   // Render
   // ---------------------------------------------------------------------
   const acc = stats ? accuracy(stats) : 100;
+  const cleared = stats ? !failed && acc >= RUN_CLEAR_ACC : false;
 
   return (
     <div className="game-root">
@@ -471,26 +478,30 @@ export default function GameScreen({
 
       {phase === 'results' && stats && (
         <div className="overlay">
-          {inRun && accuracy(stats) >= RUN_CLEAR_ACC && runStage === 5 && (
+          {inRun && cleared && runStage === 5 && (
             <div className="new-best win-title">🏆 YOU BEAT THE GAUNTLET!</div>
           )}
-          {inRun && accuracy(stats) >= RUN_CLEAR_ACC && runStage < 5 && (
+          {inRun && cleared && runStage < 5 && (
             <div className="new-best stage-clear">
               ✅ STAGE {runStage} CLEAR!
             </div>
           )}
-          {inRun && accuracy(stats) < RUN_CLEAR_ACC && (
+          {inRun && !cleared && (
             <div className="new-best run-over">
-              💔 RUN OVER — STAGE {runStage}/5
+              {failed ? '💀 GAME OVER' : '💔 RUN OVER'} — STAGE {runStage}/5
             </div>
           )}
+          {!inRun && failed && (
+            <div className="new-best run-over">💀 GAME OVER</div>
+          )}
           {!inRun &&
+            !failed &&
             (isRecord ? (
               <div className="new-best world-record">🌍 WORLD RECORD!</div>
             ) : (
               bestResult?.newBest && <div className="new-best">🏆 NEW BEST!</div>
             ))}
-          <div className="grade">{grade(stats)}</div>
+          <div className="grade">{failed ? 'F' : grade(stats)}</div>
           <div className="result-score">{stats.score.toLocaleString()}</div>
           {inRun && (
             <p className="subtle best-line run-line">
@@ -507,7 +518,12 @@ export default function GameScreen({
               🌍 World best: {globalBest.score.toLocaleString()} by {globalBest.name}
             </p>
           )}
-          {!player && difficulty === 1 && (
+          {failed && (
+            <p className="subtle">
+              Too many misses — stay under 70% missed over any 10 seconds!
+            </p>
+          )}
+          {!player && difficulty === 1 && !failed && (
             <div className="name-form">
               <input
                 type="text"
@@ -546,7 +562,7 @@ export default function GameScreen({
               <span>Miss</span>
             </div>
           </div>
-          {inRun && accuracy(stats) >= RUN_CLEAR_ACC && runStage < 5 ? (
+          {inRun && cleared && runStage < 5 ? (
             <>
               <button
                 className="big-btn"

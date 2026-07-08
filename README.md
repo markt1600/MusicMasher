@@ -43,6 +43,9 @@ Built for mobile touch screens first, with full desktop keyboard support.
   combo-driven sky spectacle (shooting stars, fireworks, rockets, UFOs,
   birds, balloons, helicopters, comets). A stage needs ≥60% accuracy to
   advance.
+- **Survival** — miss more than 70% of the notes over any trailing 10
+  seconds and it's game over; past 30% a pulsing DANGER bar counts down how
+  close you are to the edge.
 - **Rendering** — a single 2D canvas with a hand-rolled perspective
   projection: a three-lane road converging on a horizon vanishing point,
   glowing tiles, hit rings, particles, a sun that pulses with the song's
