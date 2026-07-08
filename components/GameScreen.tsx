@@ -187,6 +187,21 @@ export default function GameScreen({ songId }: { songId: string }) {
     scorePosted.current = false;
     setGlobalBest(null);
     setIsRecord(false);
+
+    // On touch devices, go fullscreen for the game (iOS Safari doesn't
+    // support the Fullscreen API — it simply no-ops there).
+    if (
+      window.matchMedia('(pointer: coarse)').matches &&
+      !document.fullscreenElement &&
+      document.documentElement.requestFullscreen
+    ) {
+      try {
+        await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+      } catch {
+        // user/browser refused — play windowed
+      }
+    }
+
     await audioCtx.resume(); // requires the user gesture we're inside of
 
     const engine = new Engine(canvas, audioCtx, buffer, map, title, {
@@ -276,7 +291,12 @@ export default function GameScreen({ songId }: { songId: string }) {
     });
   }, []);
 
-  const exit = useCallback(() => router.push('/'), [router]);
+  const exit = useCallback(() => {
+    if (document.fullscreenElement) {
+      void document.exitFullscreen().catch(() => {});
+    }
+    router.push('/');
+  }, [router]);
 
   // ---------------------------------------------------------------------
   // Render

@@ -64,7 +64,13 @@ interface ActiveNote extends Note {
   holdDoneAt: number;
   /** hold: song-time when the lane was released (0 = held to the end). */
   releasedT: number;
+  /** hold: song-time up to which combo/score ticks have been credited. */
+  lastTickT: number;
 }
+
+/** While a hold is ridden, every 0.1 s credits +1 combo and a score tick. */
+const HOLD_TICK = 0.1;
+const HOLD_TICK_SCORE = 12;
 
 /** Extra time (s) after a double's hit moment to land the second tap. */
 const DOUBLE_EXTRA = 0.5;
@@ -92,6 +98,19 @@ interface FloatText {
   born: number;
   text: string;
   color: string;
+}
+
+/** Background spectacle objects that appear as combos climb past 20. */
+interface SkyEvent {
+  type: 'star' | 'firework' | 'rocket' | 'ufo';
+  born: number;
+  dur: number;
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  hue: number;
+  seed: number;
 }
 
 export interface EngineCallbacks {
@@ -155,6 +174,8 @@ export class Engine {
   private texts: FloatText[] = [];
   private pressUntil = new Float64Array(LANES);
 
+  private skyEvents: SkyEvent[] = [];
+
   // hold-note input state
   private laneHeld = new Int8Array(LANES); // count of pointers+keys down
   private pointerLanes = new Map<number, number>();
@@ -204,6 +225,7 @@ export class Engine {
         holdDone: false,
         holdDoneAt: 0,
         releasedT: 0,
+        lastTickT: 0,
       }));
 
     this.handleResize();
@@ -441,6 +463,7 @@ export class Engine {
     // Holds start riding once the head is hit.
     if (best.kind === 'hold') {
       best.holding = true;
+      best.lastTickT = best.t;
       this.liveHolds.push(best);
     }
   }
@@ -655,6 +678,23 @@ export class Engine {
       }
     }
 
+    // Holds being ridden shower combo + score: one tick per 0.1 s held.
+    for (const n of this.liveHolds) {
+      if (!n.holding || n.holdDone) continue;
+      const end = n.t + (n.dur ?? 0);
+      while (n.lastTickT + HOLD_TICK <= Math.min(t, end)) {
+        n.lastTickT += HOLD_TICK;
+        this.combo++;
+        this.maxCombo = Math.max(this.maxCombo, this.combo);
+        const nowMs = performance.now();
+        this.lastComboChange = nowMs;
+        this.lastScoreAt = nowMs;
+        const mult = 1 + Math.min(this.combo, 100) / 100;
+        this.score += HOLD_TICK_SCORE * mult;
+        this.checkMilestone(nowMs);
+      }
+    }
+
     // Settle holds that were ridden all the way to the end.
     for (let i = this.liveHolds.length - 1; i >= 0; i--) {
       const n = this.liveHolds[i];
@@ -689,12 +729,216 @@ export class Engine {
     this.texts = this.texts.filter((tx) => now - tx.born < 700);
     this.popups = this.popups.filter((p) => now - p.born < 1300);
 
+    // Sky spectacle: past 20 combo the sky comes alive, more so as it climbs.
+    if (this.combo > 20 && t >= 0 && this.skyEvents.length < 14) {
+      const k = Math.min(1, (this.combo - 20) / 120); // 0 → 1 frenzy
+      if (Math.random() < 0.012 + 0.06 * k) this.spawnSkyEvent();
+    }
+    for (let i = this.skyEvents.length - 1; i >= 0; i--) {
+      const e = this.skyEvents[i];
+      e.x += e.vx;
+      e.y += e.vy;
+      if (now - e.born > e.dur) this.skyEvents.splice(i, 1);
+    }
+
     // Song end.
     if (!this.ended && this.songTime() > this.map.duration + 0.6) {
       this.ended = true;
       cancelAnimationFrame(this.raf);
       this.cb.onEnd(this.stats());
     }
+  }
+
+  private spawnSkyEvent(): void {
+    const { w, horizonY, dpr } = this;
+    const now = performance.now();
+    const r = Math.random();
+    const seed = Math.random() * 1000;
+    if (r < 0.4) {
+      // shooting star: fast streak across the upper sky
+      const dir = Math.random() < 0.5 ? 1 : -1;
+      this.skyEvents.push({
+        type: 'star',
+        born: now,
+        dur: 700 + Math.random() * 500,
+        x: dir > 0 ? -w * 0.05 : w * 1.05,
+        y: horizonY * (0.05 + Math.random() * 0.5),
+        vx: dir * w * (0.012 + Math.random() * 0.008),
+        vy: w * 0.002,
+        hue: 190 + Math.random() * 120,
+        seed,
+      });
+    } else if (r < 0.7) {
+      // firework burst in the sky
+      this.skyEvents.push({
+        type: 'firework',
+        born: now,
+        dur: 1000,
+        x: w * (0.12 + Math.random() * 0.76),
+        y: horizonY * (0.15 + Math.random() * 0.6),
+        vx: 0,
+        vy: 0,
+        hue: Math.random() * 360,
+        seed,
+      });
+    } else if (r < 0.88) {
+      // rocket launching from behind the mountains
+      this.skyEvents.push({
+        type: 'rocket',
+        born: now,
+        dur: 2100,
+        x: w * (0.1 + Math.random() * 0.8),
+        y: horizonY * 1.02,
+        vx: (Math.random() - 0.5) * w * 0.0006,
+        vy: -horizonY * 0.011,
+        hue: 25,
+        seed,
+      });
+    } else {
+      // UFO cruising with a wobble
+      const dir = Math.random() < 0.5 ? 1 : -1;
+      this.skyEvents.push({
+        type: 'ufo',
+        born: now,
+        dur: 3800,
+        x: dir > 0 ? -w * 0.08 : w * 1.08,
+        y: horizonY * (0.15 + Math.random() * 0.55),
+        vx: dir * w * (0.0028 + Math.random() * 0.0015),
+        vy: 0,
+        hue: 130 + Math.random() * 100,
+        seed,
+      });
+    }
+    void dpr;
+  }
+
+  private drawSkyEvents(g: CanvasRenderingContext2D): void {
+    if (this.skyEvents.length === 0) return;
+    const now = performance.now();
+    const { dpr } = this;
+    g.save();
+    for (const e of this.skyEvents) {
+      const age = (now - e.born) / e.dur;
+      if (age >= 1) continue;
+      if (e.type === 'star') {
+        g.globalCompositeOperation = 'lighter';
+        g.globalAlpha = Math.min(1, (1 - age) * 1.5);
+        const tail = 22 * dpr;
+        const grad = g.createLinearGradient(
+          e.x - e.vx * tail * 0.1,
+          e.y - e.vy * tail * 0.1,
+          e.x,
+          e.y
+        );
+        grad.addColorStop(0, 'hsla(0,0%,100%,0)');
+        grad.addColorStop(1, `hsla(${e.hue}, 100%, 85%, 0.95)`);
+        g.strokeStyle = grad;
+        g.lineWidth = 2 * dpr;
+        g.beginPath();
+        g.moveTo(e.x - e.vx * tail * 0.1, e.y - e.vy * tail * 0.1);
+        g.lineTo(e.x, e.y);
+        g.stroke();
+        g.fillStyle = '#ffffff';
+        g.beginPath();
+        g.arc(e.x, e.y, 1.6 * dpr, 0, Math.PI * 2);
+        g.fill();
+      } else if (e.type === 'firework') {
+        g.globalCompositeOperation = 'lighter';
+        const rMax = this.horizonY * 0.35;
+        const burst = easeOutCubic(Math.min(1, age * 1.6));
+        g.globalAlpha = 1 - age;
+        for (let i = 0; i < 16; i++) {
+          const a = (i / 16) * Math.PI * 2 + e.seed;
+          const rr = rMax * burst * (0.75 + ((i * 37) % 10) / 40);
+          g.fillStyle = `hsl(${e.hue + (i % 3) * 25}, 100%, ${75 - age * 25}%)`;
+          g.beginPath();
+          g.arc(
+            e.x + Math.cos(a) * rr,
+            e.y + Math.sin(a) * rr * 0.85 + age * age * 18 * dpr,
+            Math.max(0.5, (2.4 - age * 1.8) * dpr),
+            0,
+            Math.PI * 2
+          );
+          g.fill();
+        }
+        // core flash
+        if (age < 0.25) {
+          g.globalAlpha = (1 - age / 0.25) * 0.8;
+          g.fillStyle = '#ffffff';
+          g.beginPath();
+          g.arc(e.x, e.y, 4 * dpr * (1 - age), 0, Math.PI * 2);
+          g.fill();
+        }
+      } else if (e.type === 'rocket') {
+        const wob = Math.sin(now / 90 + e.seed) * 1.2 * dpr;
+        const x = e.x + wob;
+        g.globalAlpha = Math.min(1, (1 - age) * 2);
+        // flame
+        g.save();
+        g.globalCompositeOperation = 'lighter';
+        const flick = 1 + Math.sin(now / 35 + e.seed) * 0.3;
+        const fl = g.createRadialGradient(x, e.y + 8 * dpr, 0, x, e.y + 8 * dpr, 14 * dpr * flick);
+        fl.addColorStop(0, 'hsla(45, 100%, 80%, 0.95)');
+        fl.addColorStop(0.5, 'hsla(25, 100%, 60%, 0.6)');
+        fl.addColorStop(1, 'hsla(15, 100%, 50%, 0)');
+        g.fillStyle = fl;
+        g.beginPath();
+        g.moveTo(x - 3 * dpr, e.y + 6 * dpr);
+        g.lineTo(x + 3 * dpr, e.y + 6 * dpr);
+        g.lineTo(x, e.y + (16 + 8 * flick) * dpr);
+        g.closePath();
+        g.fill();
+        g.restore();
+        // body
+        g.fillStyle = '#e8ecf5';
+        g.beginPath();
+        g.moveTo(x, e.y - 10 * dpr); // nose
+        g.lineTo(x + 3.5 * dpr, e.y - 2 * dpr);
+        g.lineTo(x + 3.5 * dpr, e.y + 6 * dpr);
+        g.lineTo(x - 3.5 * dpr, e.y + 6 * dpr);
+        g.lineTo(x - 3.5 * dpr, e.y - 2 * dpr);
+        g.closePath();
+        g.fill();
+        g.fillStyle = '#ff5d7d';
+        g.beginPath(); // fins
+        g.moveTo(x - 3.5 * dpr, e.y + 6 * dpr);
+        g.lineTo(x - 7 * dpr, e.y + 10 * dpr);
+        g.lineTo(x - 3.5 * dpr, e.y + 1 * dpr);
+        g.moveTo(x + 3.5 * dpr, e.y + 6 * dpr);
+        g.lineTo(x + 7 * dpr, e.y + 10 * dpr);
+        g.lineTo(x + 3.5 * dpr, e.y + 1 * dpr);
+        g.fill();
+      } else {
+        // UFO: metallic saucer with dome and blinking lights
+        const y = e.y + Math.sin(now / 260 + e.seed) * 9 * dpr;
+        const rw = 16 * dpr;
+        const rh = 5.5 * dpr;
+        g.globalAlpha = Math.min(1, (1 - age) * 3);
+        // dome
+        g.fillStyle = 'rgba(140, 240, 255, 0.55)';
+        g.beginPath();
+        g.arc(e.x, y - rh * 0.6, rw * 0.42, Math.PI, 0);
+        g.fill();
+        // body
+        const body = g.createLinearGradient(e.x, y - rh, e.x, y + rh);
+        body.addColorStop(0, '#cdd6e8');
+        body.addColorStop(0.6, '#8b96ad');
+        body.addColorStop(1, '#5a6378');
+        g.fillStyle = body;
+        g.beginPath();
+        g.ellipse(e.x, y, rw, rh, 0, 0, Math.PI * 2);
+        g.fill();
+        // blinking lights
+        for (let i = -1; i <= 1; i++) {
+          const on = Math.floor(now / 160 + i + e.seed) % 2 === 0;
+          g.fillStyle = on ? `hsl(${e.hue}, 100%, 70%)` : 'rgba(30,34,48,0.9)';
+          g.beginPath();
+          g.arc(e.x + i * rw * 0.5, y + rh * 0.45, 1.8 * dpr, 0, Math.PI * 2);
+          g.fill();
+        }
+      }
+    }
+    g.restore();
   }
 
   private envAt(t: number): number {
@@ -717,6 +961,7 @@ export class Engine {
     const hue = 178 + prog * 110;
 
     this.drawBackground(g, t, hue, env);
+    this.drawSkyEvents(g);
     this.drawRoad(g, t, hue, env, prog);
     this.drawNotes(g, t, prog);
     this.drawHitLine(g, hue, prog, now);
@@ -1356,9 +1601,13 @@ export class Engine {
     g.fillStyle = `hsl(${hue}, 100%, 65%)`;
     g.fillRect(0, 0, w * prog, 3 * dpr);
 
-    // Big bouncy score, centered at the top.
+    // Big bouncy score, centered at the top. While a hold is being ridden it
+    // grows larger and blinks gold to sell the rapid accumulation.
+    const holdActive = this.liveHolds.some((n) => n.holding && !n.holdDone);
     const bump = Math.max(0, 1 - (now - this.lastScoreAt) / 260);
-    const pop = 1 + bump * bump * 0.28;
+    const pop = holdActive
+      ? 1.3 + 0.09 * Math.sin(now / 42)
+      : 1 + bump * bump * 0.28;
     const wobble = Math.sin(now / 320) * 0.035;
     const scoreStr = Math.round(this.shownScore).toLocaleString();
     g.save();
@@ -1372,9 +1621,17 @@ export class Engine {
     g.strokeStyle = 'rgba(8, 5, 28, 0.9)';
     g.strokeText(scoreStr, 0, 0);
     const sg = g.createLinearGradient(0, -26 * dpr, 0, 12 * dpr);
-    sg.addColorStop(0, '#ffffff');
-    sg.addColorStop(0.55, `hsl(${hue}, 100%, 72%)`);
-    sg.addColorStop(1, `hsl(${hue + 45}, 100%, 62%)`);
+    if (holdActive) {
+      const flash = 0.5 + 0.5 * Math.sin(now / 55);
+      sg.addColorStop(0, '#ffffff');
+      sg.addColorStop(0.5, `hsl(48, 100%, ${62 + flash * 26}%)`);
+      sg.addColorStop(1, `hsl(38, 100%, ${55 + flash * 20}%)`);
+      g.globalAlpha = 0.88 + 0.12 * flash;
+    } else {
+      sg.addColorStop(0, '#ffffff');
+      sg.addColorStop(0.55, `hsl(${hue}, 100%, 72%)`);
+      sg.addColorStop(1, `hsl(${hue + 45}, 100%, 62%)`);
+    }
     g.fillStyle = sg;
     g.fillText(scoreStr, 0, 0);
     g.restore();
