@@ -41,6 +41,15 @@ const JUDGE_COLOR: Record<Judgement, string> = {
   miss: '#ff5d7d',
 };
 
+/** Base hue per lane: cyan, magenta, amber. Tiles, pads and hit effects all
+ * derive from these so each column reads as its own color. */
+const LANE_HUES = [185, 310, 38];
+
+/** Lane hue with a gentle drift as the song progresses. */
+function laneHue(lane: number, prog: number): number {
+  return LANE_HUES[lane] + prog * 18;
+}
+
 interface ActiveNote extends Note {
   judged: Judgement | null;
   judgedAt: number;
@@ -330,10 +339,15 @@ export class Engine {
 
   private spawnHitEffects(lane: number, j: Judgement): void {
     const now = performance.now();
-    this.rings.push({ lane, born: now, color: JUDGE_COLOR[j], ghost: false });
+    const hue = LANE_HUES[lane];
+    this.rings.push({
+      lane,
+      born: now,
+      color: `hsl(${hue}, 100%, 72%)`,
+      ghost: false,
+    });
     const x = this.laneX(lane, 1);
     const count = j === 'perfect' ? 16 : j === 'great' ? 10 : 6;
-    const hue = j === 'perfect' ? 172 : j === 'great' ? 210 : 55;
     for (let i = 0; i < count; i++) {
       const a = Math.random() * Math.PI * 2;
       const sp = (0.5 + Math.random()) * this.w * 0.004;
@@ -490,8 +504,8 @@ export class Engine {
 
     this.drawBackground(g, t, hue, env);
     this.drawRoad(g, t, hue, env, prog);
-    this.drawNotes(g, t, hue);
-    this.drawHitLine(g, hue, now);
+    this.drawNotes(g, t, prog);
+    this.drawHitLine(g, hue, prog, now);
     this.drawEffects(g, now);
     this.drawHUD(g, t, prog, now, hue);
   }
@@ -633,7 +647,7 @@ export class Engine {
     g.fillRect(0, hitY, this.w, h - hitY);
   }
 
-  private drawNotes(g: CanvasRenderingContext2D, t: number, hue: number): void {
+  private drawNotes(g: CanvasRenderingContext2D, t: number, prog: number): void {
     const tJudge = t - this.offsetMs / 1000;
     const approach = this.approachAt(Math.max(0, t));
 
@@ -642,6 +656,7 @@ export class Engine {
       const d = (n.t - tJudge) / approach;
       if (d > 1.05) break; // notes sorted by time; rest are farther out
       if (d < -0.12) continue;
+      const hue = laneHue(n.lane, prog);
       if (n.judged && n.judged !== 'miss') {
         // brief shrink-out at the hit line
         const age = (performance.now() - n.judgedAt) / 160;
@@ -732,7 +747,12 @@ export class Engine {
     g.globalAlpha = 1;
   }
 
-  private drawHitLine(g: CanvasRenderingContext2D, hue: number, now: number): void {
+  private drawHitLine(
+    g: CanvasRenderingContext2D,
+    hue: number,
+    prog: number,
+    now: number
+  ): void {
     const { cx, hitY, roadHalf, laneW } = this;
 
     // Bar across the road
@@ -750,26 +770,77 @@ export class Engine {
     g.stroke();
     g.restore();
 
-    // Lane pads
+    // Extruded 3D buttons, one color per lane. Each is a squat cylinder whose
+    // top face sinks toward the base while pressed.
     for (let lane = 0; lane < LANES; lane++) {
       const x = this.laneX(lane, 1);
       const pressed = now < this.pressUntil[lane];
-      const r = laneW * 0.3 * (pressed ? 1.12 : 1);
+      const padHue = laneHue(lane, prog);
+      const rx = laneW * 0.31;
+      const ry = rx * 0.4;
+      const height = laneW * 0.17;
+      const baseY = hitY + ry * 0.4;
+      const topY = baseY - (pressed ? height * 0.35 : height);
+
+      // Colored glow pooling under the button.
       g.save();
       g.globalCompositeOperation = 'lighter';
-      const pad = g.createRadialGradient(x, hitY, r * 0.1, x, hitY, r * 1.5);
-      const inner = pressed ? 0.95 : 0.4;
-      pad.addColorStop(0, `hsla(${hue}, 100%, 80%, ${inner})`);
-      pad.addColorStop(0.55, `hsla(${hue}, 95%, 60%, ${pressed ? 0.5 : 0.18})`);
-      pad.addColorStop(1, 'hsla(0,0%,0%,0)');
-      g.fillStyle = pad;
-      g.fillRect(x - r * 1.5, hitY - r * 1.5, r * 3, r * 3);
+      const glowR = rx * (pressed ? 2.1 : 1.5);
+      const pool = g.createRadialGradient(x, baseY, rx * 0.2, x, baseY, glowR);
+      pool.addColorStop(0, `hsla(${padHue}, 100%, 65%, ${pressed ? 0.6 : 0.28})`);
+      pool.addColorStop(1, 'hsla(0,0%,0%,0)');
+      g.fillStyle = pool;
+      g.fillRect(x - glowR, baseY - glowR * 0.6, glowR * 2, glowR * 1.2);
       g.restore();
 
-      g.strokeStyle = `hsla(${hue}, 100%, ${pressed ? 85 : 70}%, ${pressed ? 1 : 0.6})`;
+      // Base rim (dark ellipse peeking out below the wall).
+      g.fillStyle = `hsl(${padHue}, 70%, 10%)`;
+      g.beginPath();
+      g.ellipse(x, baseY, rx * 1.04, ry * 1.04, 0, 0, Math.PI * 2);
+      g.fill();
+
+      // Side wall: lower arc of the base ellipse up to the lower arc of the
+      // top ellipse.
+      const wall = g.createLinearGradient(0, topY, 0, baseY + ry);
+      wall.addColorStop(0, `hsl(${padHue}, 85%, ${pressed ? 45 : 38}%)`);
+      wall.addColorStop(1, `hsl(${padHue}, 90%, ${pressed ? 22 : 16}%)`);
+      g.fillStyle = wall;
+      g.beginPath();
+      g.ellipse(x, baseY, rx, ry, 0, 0, Math.PI, false);
+      g.lineTo(x - rx, topY);
+      g.ellipse(x, topY, rx, ry, 0, Math.PI, 0, true);
+      g.closePath();
+      g.fill();
+
+      // Top face.
+      const top = g.createRadialGradient(
+        x - rx * 0.25,
+        topY - ry * 0.4,
+        rx * 0.1,
+        x,
+        topY,
+        rx * 1.15
+      );
+      top.addColorStop(0, `hsl(${padHue}, 100%, ${pressed ? 88 : 74}%)`);
+      top.addColorStop(0.65, `hsl(${padHue}, 95%, ${pressed ? 70 : 52}%)`);
+      top.addColorStop(1, `hsl(${padHue}, 95%, ${pressed ? 55 : 38}%)`);
+      g.fillStyle = top;
+      g.beginPath();
+      g.ellipse(x, topY, rx, ry, 0, 0, Math.PI * 2);
+      g.fill();
+
+      // Bright rim on the top face.
+      g.strokeStyle = `hsla(${padHue}, 100%, ${pressed ? 92 : 80}%, ${pressed ? 1 : 0.75})`;
       g.lineWidth = (pressed ? 2.5 : 1.5) * this.dpr;
       g.beginPath();
-      g.ellipse(x, hitY, r, r * 0.38, 0, 0, Math.PI * 2);
+      g.ellipse(x, topY, rx, ry, 0, 0, Math.PI * 2);
+      g.stroke();
+
+      // Inner marker ring so the tap target reads at a glance.
+      g.strokeStyle = `hsla(${padHue}, 100%, 90%, ${pressed ? 0.9 : 0.4})`;
+      g.lineWidth = 1 * this.dpr;
+      g.beginPath();
+      g.ellipse(x, topY, rx * 0.55, ry * 0.55, 0, 0, Math.PI * 2);
       g.stroke();
     }
   }
