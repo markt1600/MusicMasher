@@ -504,6 +504,7 @@ export class Engine {
       [50, 'ON FIRE! 🔥'],
       [75, 'BLAZING!'],
       [100, 'UNSTOPPABLE!'],
+      [125, 'YOU ARE A MUSICAL GOD!!!'],
       [150, 'GODLIKE!'],
       [200, 'LEGENDARY!'],
       [300, 'LEGENDARY!'],
@@ -720,6 +721,7 @@ export class Engine {
     this.drawNotes(g, t, prog);
     this.drawHitLine(g, hue, prog, now);
     this.drawEffects(g, now);
+    this.drawComboPulse(g, t, env, hue);
     this.drawHUD(g, t, prog, now, hue);
   }
 
@@ -1314,6 +1316,31 @@ export class Engine {
     g.restore();
   }
 
+  /** As combos grow, the whole screen pulses gently to the beat, cycling
+   * through colors — subtle at 10, unmistakable past 100. */
+  private drawComboPulse(
+    g: CanvasRenderingContext2D,
+    t: number,
+    env: number,
+    hue: number
+  ): void {
+    if (this.combo < 10 || t < 0) return;
+    const { w, h } = this;
+    const beat = 1 - ((t * this.map.bpm) / 60) % 1; // 1 on the beat, decaying
+    const strength = Math.min(1, this.combo / 120);
+    const alpha = strength * (0.05 + 0.16 * beat * beat) * (0.55 + env * 0.45);
+    if (alpha <= 0.01) return;
+    const pulseHue = (hue + t * 55 + this.combo * 2.5) % 360;
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    const grad = g.createRadialGradient(w / 2, h / 2, h * 0.3, w / 2, h / 2, h * 0.78);
+    grad.addColorStop(0, 'hsla(0,0%,0%,0)');
+    grad.addColorStop(1, `hsla(${pulseHue}, 100%, 62%, ${alpha})`);
+    g.fillStyle = grad;
+    g.fillRect(0, 0, w, h);
+    g.restore();
+  }
+
   private drawHUD(
     g: CanvasRenderingContext2D,
     t: number,
@@ -1395,7 +1422,9 @@ export class Engine {
       g.font = `900 ${Math.round(15 * dpr)}px ${COMIC_FONT}`;
       g.fillStyle = 'rgba(255,255,255,0.75)';
       g.fillText(p.sub, 0, -30 * dpr);
-      g.font = `900 ${Math.round(38 * dpr)}px ${COMIC_FONT}`;
+      // Shrink long callouts to fit the screen width.
+      const titleSize = Math.min(38, (w / dpr / p.title.length) * 1.55);
+      g.font = `900 ${Math.round(titleSize * dpr)}px ${COMIC_FONT}`;
       g.lineJoin = 'round';
       g.lineWidth = 8 * dpr;
       g.strokeStyle = 'rgba(8, 5, 28, 0.92)';
