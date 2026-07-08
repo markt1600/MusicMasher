@@ -347,6 +347,8 @@ export default function LibraryPage() {
         <br />
         Desktop: <kbd>A</kbd> <kbd>S</kbd> <kbd>D</kbd> or <kbd>J</kbd>{' '}
         <kbd>K</kbd> <kbd>L</kbd> or arrow keys · <kbd>Esc</kbd> to pause
+        <br />
+        <Link href="/admin">admin</Link>
       </div>
 
       {pending && (

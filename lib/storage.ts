@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import { list, put } from '@vercel/blob';
+import { del, list, put } from '@vercel/blob';
 import type { SongMeta } from './types';
 
 export const MAX_SONG_BYTES = 50 * 1024 * 1024; // 50 MB (WAV/AIFF are uncompressed)
@@ -145,6 +145,23 @@ export async function saveLocalSong(
     JSON.stringify(full, null, 2)
   );
   return full;
+}
+
+/** Remove a song (audio + metadata) from storage. Returns false if absent. */
+export async function deleteSong(id: string): Promise<boolean> {
+  if (!isValidSongId(id)) return false;
+  if (storageMode() === 'blob') {
+    const res = await list({ prefix: `songs/${id}/`, limit: 100 });
+    if (res.blobs.length === 0) return false;
+    await del(res.blobs.map((b) => b.url));
+    return true;
+  }
+  const meta = await getSong(id);
+  if (!meta) return false;
+  const ext = meta.ext && isValidExt(meta.ext) ? meta.ext : 'mp3';
+  await fs.rm(path.join(LOCAL_DIR, `${id}.${ext}`), { force: true });
+  await fs.rm(path.join(LOCAL_DIR, `${id}.json`), { force: true });
+  return true;
 }
 
 export async function readLocalAudio(

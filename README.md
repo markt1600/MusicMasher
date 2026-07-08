@@ -70,6 +70,13 @@ Without a Blob store the app still runs, but uploads fail on Vercel (the
 serverless filesystem is ephemeral) — the Blob store is the one required
 piece of setup.
 
+## Admin
+
+`/admin` (also linked from the library footer) lets you delete uploaded songs.
+The default password is `yippy`; set the `ADMIN_PASSWORD` environment variable
+in Vercel to change it. Deletion removes both the audio and its metadata for
+everyone.
+
 ## Notes
 
 - Max upload: 50 MB / 20 minutes; MP3, AAC, AIFF, or WAV. Files are validated

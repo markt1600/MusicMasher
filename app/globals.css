@@ -429,6 +429,55 @@ button {
   font-weight: 700;
 }
 
+.load-bar {
+  width: min(260px, 70vw);
+}
+
+/* ---------- Admin ---------- */
+
+.admin-card {
+  border-radius: 18px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  padding: 20px 18px;
+  max-width: 380px;
+  margin: 0 auto;
+}
+
+.admin-row {
+  cursor: default;
+}
+
+.admin-logout {
+  padding: 7px 18px;
+  font-size: 12.5px;
+}
+
+.admin-notice {
+  margin-bottom: 12px;
+}
+
+.danger-btn {
+  flex-shrink: 0;
+  padding: 9px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #ff8fa5;
+  border: 1px solid rgba(255, 93, 125, 0.4);
+  background: rgba(255, 93, 125, 0.08);
+  transition: background 0.15s;
+}
+
+.danger-btn:hover {
+  background: rgba(255, 93, 125, 0.18);
+}
+
+.danger-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 /* ---------- Track details modal ---------- */
 
 .modal-backdrop {
