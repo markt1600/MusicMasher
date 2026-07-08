@@ -332,6 +332,13 @@ export default function LibraryPage() {
     router.push(`/play/${pick.id}`);
   }, [router, songs]);
 
+  const startGauntlet = useCallback(() => {
+    const pool = songs?.length ? songs : [{ id: 'demo' }];
+    const pick = pool[Math.floor(Math.random() * pool.length)];
+    sessionStorage.setItem('mm-run-total', '0');
+    router.push(`/play/${pick.id}?run=1&stage=1`);
+  }, [router, songs]);
+
   const onDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
@@ -351,6 +358,10 @@ export default function LibraryPage() {
       {totalScore > 0 && (
         <p className="total-score">🏆 Total score: {totalScore.toLocaleString()}</p>
       )}
+
+      <button className="gauntlet-btn" onClick={startGauntlet}>
+        ⚔️ &nbsp;Gauntlet — survive 5 songs of rising difficulty!
+      </button>
 
       <div className="library-head">
         <div className="section-title">Song library</div>

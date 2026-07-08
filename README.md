@@ -35,7 +35,14 @@ Built for mobile touch screens first, with full desktop keyboard support.
   All of it ramps up with song progress.
 - **Scores** — per-song personal bests and a cumulative total score are kept
   on your device; shared play counts power a "Most played" sort in the
-  library. Combo milestones celebrate on screen as you stack them.
+  library. Combo milestones celebrate on screen as you stack them, and world
+  records plus a cumulative all-players leaderboard persist server-side.
+- **Gauntlet mode** — survive 5 randomly-chosen songs of rising difficulty
+  (denser charts, faster scroll) to win. Each stage plays in a different
+  world — synthwave, city, beach, space, aurora — each with its own
+  combo-driven sky spectacle (shooting stars, fireworks, rockets, UFOs,
+  birds, balloons, helicopters, comets). A stage needs ≥60% accuracy to
+  advance.
 - **Rendering** — a single 2D canvas with a hand-rolled perspective
   projection: a three-lane road converging on a horizon vanishing point,
   glowing tiles, hit rings, particles, a sun that pulses with the song's

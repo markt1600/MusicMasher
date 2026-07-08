@@ -41,7 +41,8 @@ interface Onset {
 
 export async function analyzeAudio(
   buffer: AudioBuffer,
-  onProgress?: (p: number) => void
+  onProgress?: (p: number) => void,
+  difficulty = 1
 ): Promise<Beatmap> {
   const sr = buffer.sampleRate;
   const duration = buffer.duration;
@@ -205,7 +206,7 @@ export async function analyzeAudio(
   }
 
   // --- difficulty-ramped note selection --------------------------------------
-  const notes = buildNotes(onsets, duration, bpm, envelope, ENVELOPE_RATE);
+  const notes = buildNotes(onsets, duration, bpm, envelope, ENVELOPE_RATE, difficulty);
 
   return { notes, bpm, duration, envelope, envelopeRate: ENVELOPE_RATE };
 }
@@ -241,9 +242,13 @@ function buildNotes(
   duration: number,
   bpm: number,
   envelope: Float32Array,
-  envelopeRate: number
+  envelopeRate: number,
+  difficulty = 1
 ): Note[] {
   const rng = mulberry32(Math.round(duration * 1000) ^ (onsets.length << 8));
+  // Gauntlet stages: denser charts and more flourishes at higher difficulty.
+  const gapScale = Math.max(0.65, 1 - 0.08 * (difficulty - 1));
+  const flourishMul = 1 + 0.18 * (difficulty - 1);
 
   // Fallback for songs where onset detection finds almost nothing: lay tiles
   // on a straight beat grid so every upload is still playable.
@@ -304,10 +309,10 @@ function buildNotes(
     const p = Math.min(1, o.t / duration);
     const ramp = easeInOut(p);
 
-    const minGap = 0.42 - 0.26 * ramp; // 0.42 s → 0.16 s
+    const minGap = (0.42 - 0.26 * ramp) * gapScale; // 0.42 s → 0.16 s (tighter in gauntlet)
     if (o.t - lastT < minGap) continue;
 
-    const cut = quantile(0.55 * (1 - ramp)); // top 45% early → everything late
+    const cut = quantile((0.55 * (1 - ramp)) / flourishMul); // top 45% early → everything late
     if (o.strength < cut) continue;
 
     const next = onsets[i + 1];
@@ -315,7 +320,7 @@ function buildNotes(
 
     // --- Stream: a run of rapid onsets (fills, rolls) becomes a burst of
     // alternating tiles riding the actual hits. Late-game only.
-    if (p > 0.5 && gapToNext <= 0.24 && rng() < 0.12 + 0.3 * ramp) {
+    if (p > 0.5 && gapToNext <= 0.24 && rng() < (0.12 + 0.3 * ramp) * flourishMul) {
       let run = 1;
       while (
         i + run < onsets.length &&
@@ -351,7 +356,7 @@ function buildNotes(
       o.strength >= quantile(0.45) &&
       next.strength >= quantile(0.35) &&
       o.t - lastT >= minGap * 1.25 &&
-      rng() < 0.25 + 0.35 * ramp
+      rng() < (0.25 + 0.35 * ramp) * flourishMul
     ) {
       const lane = pickLane(o, o.t - lastT);
       notes.push({ t: o.t, lane, kind: 'double' });
@@ -403,7 +408,7 @@ function buildNotes(
     // --- Plain tap (+ chord on strong, well-spaced hits after 30%).
     notes.push({ t: o.t, lane });
 
-    const chordChance = p > 0.3 ? ((p - 0.3) / 0.7) * 0.4 : 0;
+    const chordChance = p > 0.3 ? ((p - 0.3) / 0.7) * 0.4 * flourishMul : 0;
     if (
       chordChance > 0 &&
       o.strength >= quantile(0.75) &&

@@ -581,6 +581,47 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+.gauntlet-btn {
+  display: block;
+  width: 100%;
+  margin-bottom: 26px;
+  padding: 15px;
+  border-radius: 16px;
+  font-size: 15px;
+  font-weight: 800;
+  color: #fff;
+  background: linear-gradient(120deg, #b44dff, #ff4dd2 60%, #ff7a4d);
+  box-shadow: 0 0 28px rgba(255, 77, 210, 0.35);
+  transition: transform 0.12s, box-shadow 0.2s;
+}
+
+.gauntlet-btn:hover {
+  box-shadow: 0 0 40px rgba(255, 77, 210, 0.55);
+}
+
+.gauntlet-btn:active {
+  transform: scale(0.98);
+}
+
+.win-title {
+  color: #ffd76e;
+  font-size: 24px;
+}
+
+.stage-clear {
+  color: #9dffc9;
+  text-shadow: 0 0 24px rgba(157, 255, 201, 0.55);
+}
+
+.run-over {
+  color: #ff7d9d;
+  text-shadow: 0 0 24px rgba(255, 125, 157, 0.45);
+}
+
+.run-line b {
+  color: #ffd76e;
+}
+
 .upload-link {
   display: block;
   width: 100%;

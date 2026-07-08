@@ -101,8 +101,18 @@ interface FloatText {
 }
 
 /** Background spectacle objects that appear as combos climb past 20. */
+type SkyEventType =
+  | 'star'
+  | 'firework'
+  | 'rocket'
+  | 'ufo'
+  | 'comet'
+  | 'bird'
+  | 'balloon'
+  | 'heli';
+
 interface SkyEvent {
-  type: 'star' | 'firework' | 'rocket' | 'ufo';
+  type: SkyEventType;
   born: number;
   dur: number;
   x: number;
@@ -111,6 +121,36 @@ interface SkyEvent {
   vy: number;
   hue: number;
   seed: number;
+}
+
+/** Background themes: distinct palette, scenery, and combo-event mix. */
+export const THEMES = ['synthwave', 'city', 'beach', 'space', 'aurora'] as const;
+export type ThemeName = (typeof THEMES)[number];
+
+const THEME_BASE_HUE: Record<ThemeName, number> = {
+  synthwave: 178,
+  city: 222,
+  beach: 165,
+  space: 258,
+  aurora: 130,
+};
+
+/** Weighted sky-event pools per theme (repeats = higher weight). */
+const THEME_EVENTS: Record<ThemeName, SkyEventType[]> = {
+  synthwave: ['star', 'star', 'firework', 'rocket', 'ufo'],
+  city: ['firework', 'firework', 'heli', 'star', 'balloon'],
+  beach: ['bird', 'bird', 'balloon', 'firework', 'star'],
+  space: ['comet', 'comet', 'rocket', 'ufo', 'firework'],
+  aurora: ['star', 'comet', 'comet', 'firework', 'balloon'],
+};
+
+export interface EngineOptions {
+  /** Background theme index (wraps around THEMES). */
+  theme?: number;
+  /** 1 = normal; higher = faster scroll (gauntlet stages). */
+  difficulty?: number;
+  /** Shown in the HUD during gauntlet runs, e.g. "STAGE 2/5". */
+  stageLabel?: string;
 }
 
 export interface EngineCallbacks {
@@ -195,7 +235,14 @@ export class Engine {
   // scenery
   private stars: { x: number; y: number; r: number; phase: number }[] = [];
   private mountains: Path2D[] = [];
+  private cityWindows: { x: number; y: number }[] = [];
+  private planet = { x: 0, y: 0, r: 0 };
   private resizeObserver: ResizeObserver | null = null;
+
+  // mode
+  private theme: ThemeName = 'synthwave';
+  private difficulty = 1;
+  private stageLabel = '';
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -203,7 +250,8 @@ export class Engine {
     buffer: AudioBuffer,
     map: Beatmap,
     title: string,
-    cb: EngineCallbacks
+    cb: EngineCallbacks,
+    opts: EngineOptions = {}
   ) {
     this.canvas = canvas;
     const g = canvas.getContext('2d');
@@ -214,6 +262,9 @@ export class Engine {
     this.map = map;
     this.title = title;
     this.cb = cb;
+    this.theme = THEMES[Math.abs(Math.round(opts.theme ?? 0)) % THEMES.length];
+    this.difficulty = Math.max(1, Math.min(5, opts.difficulty ?? 1));
+    this.stageLabel = opts.stageLabel ?? '';
     this.notes = [...map.notes]
       .sort((a, b) => a.t - b.t)
       .map((n) => ({
@@ -306,7 +357,9 @@ export class Engine {
 
   private approachAt(t: number): number {
     const p = Math.min(1, Math.max(0, t / this.map.duration));
-    return 1.95 - 0.7 * easeInOut(p);
+    // Gauntlet stages scroll faster across the board.
+    const diffScale = Math.max(0.72, 1 - 0.055 * (this.difficulty - 1));
+    return (1.95 - 0.7 * easeInOut(p)) * diffScale;
   }
 
   // -------------------------------------------------------------------------
@@ -622,7 +675,7 @@ export class Engine {
   private buildScenery(): void {
     const rng = mulberry32Local(42);
     this.stars = [];
-    const starCount = 90;
+    const starCount = this.theme === 'space' ? 150 : 90;
     for (let i = 0; i < starCount; i++) {
       this.stars.push({
         x: rng() * this.w,
@@ -631,22 +684,87 @@ export class Engine {
         phase: rng() * Math.PI * 2,
       });
     }
-    // Two silhouette mountain layers.
     this.mountains = [];
-    for (let layer = 0; layer < 2; layer++) {
+    this.cityWindows = [];
+    const base = this.horizonY + this.h * 0.002;
+
+    if (this.theme === 'city') {
+      // Blocky skyline with lit windows.
       const path = new Path2D();
-      const base = this.horizonY + this.h * 0.002;
-      const amp = this.h * (layer === 0 ? 0.085 : 0.05);
       path.moveTo(0, base);
-      const segs = 9 + layer * 4;
-      for (let i = 0; i <= segs; i++) {
-        const x = (i / segs) * this.w;
-        const y = base - Math.abs(Math.sin(i * (2.3 + layer) + layer * 7)) * amp * (0.4 + rng() * 0.6);
-        path.lineTo(x, y);
+      let x = 0;
+      while (x < this.w) {
+        const bw = this.w * (0.05 + rng() * 0.09);
+        const bh = this.h * (0.035 + rng() * 0.09);
+        path.lineTo(x, base - bh);
+        path.lineTo(x + bw, base - bh);
+        path.lineTo(x + bw, base);
+        // windows for this building
+        const cols = Math.max(1, Math.floor(bw / (7 * this.dpr)));
+        const rows = Math.max(1, Math.floor(bh / (9 * this.dpr)));
+        for (let c = 0; c < cols; c++) {
+          for (let r = 0; r < rows; r++) {
+            if (rng() < 0.4) {
+              this.cityWindows.push({
+                x: x + (c + 0.5) * (bw / cols),
+                y: base - bh + (r + 0.5) * (bh / rows),
+              });
+            }
+          }
+        }
+        x += bw;
       }
       path.lineTo(this.w, base);
       path.closePath();
-      this.mountains.push(path);
+      this.mountains.push(path, new Path2D());
+    } else if (this.theme === 'beach') {
+      // Low dunes/islands at the edges; open ocean in the middle.
+      for (let layer = 0; layer < 2; layer++) {
+        const path = new Path2D();
+        const amp = this.h * (layer === 0 ? 0.03 : 0.018);
+        path.moveTo(0, base);
+        for (let i = 0; i <= 14; i++) {
+          const px = (i / 14) * this.w;
+          const edge = Math.max(0, Math.abs(px - this.w / 2) / (this.w / 2) - 0.35);
+          path.lineTo(px, base - edge * Math.abs(Math.sin(i * 1.7 + layer * 3)) * amp * 18);
+        }
+        path.lineTo(this.w, base);
+        path.closePath();
+        this.mountains.push(path);
+      }
+    } else if (this.theme === 'space') {
+      // Cratered ridge plus a big ringed planet.
+      const path = new Path2D();
+      path.moveTo(0, base);
+      for (let i = 0; i <= 20; i++) {
+        const px = (i / 20) * this.w;
+        path.lineTo(px, base - Math.abs(Math.sin(i * 2.7)) * this.h * 0.02 * (0.4 + rng() * 0.6));
+      }
+      path.lineTo(this.w, base);
+      path.closePath();
+      this.mountains.push(path, new Path2D());
+      this.planet = {
+        x: this.w * 0.74,
+        y: this.horizonY * 0.4,
+        r: this.h * 0.075,
+      };
+    } else {
+      // synthwave + aurora: jagged peaks (aurora's are steeper).
+      const steep = this.theme === 'aurora' ? 1.6 : 1;
+      for (let layer = 0; layer < 2; layer++) {
+        const path = new Path2D();
+        const amp = this.h * (layer === 0 ? 0.085 : 0.05) * steep;
+        path.moveTo(0, base);
+        const segs = 9 + layer * 4;
+        for (let i = 0; i <= segs; i++) {
+          const px = (i / segs) * this.w;
+          const py = base - Math.abs(Math.sin(i * (2.3 + layer) + layer * 7)) * amp * (0.4 + rng() * 0.6);
+          path.lineTo(px, py);
+        }
+        path.lineTo(this.w, base);
+        path.closePath();
+        this.mountains.push(path);
+      }
     }
   }
 
@@ -750,25 +868,27 @@ export class Engine {
   }
 
   private spawnSkyEvent(): void {
-    const { w, horizonY, dpr } = this;
+    const { w, horizonY } = this;
     const now = performance.now();
-    const r = Math.random();
     const seed = Math.random() * 1000;
-    if (r < 0.4) {
+    const pool = THEME_EVENTS[this.theme];
+    const type = pool[Math.floor(Math.random() * pool.length)];
+    if (type === 'star' || type === 'comet') {
       // shooting star: fast streak across the upper sky
       const dir = Math.random() < 0.5 ? 1 : -1;
+      const comet = type === 'comet';
       this.skyEvents.push({
-        type: 'star',
+        type,
         born: now,
-        dur: 700 + Math.random() * 500,
+        dur: (comet ? 1100 : 700) + Math.random() * 500,
         x: dir > 0 ? -w * 0.05 : w * 1.05,
         y: horizonY * (0.05 + Math.random() * 0.5),
-        vx: dir * w * (0.012 + Math.random() * 0.008),
+        vx: dir * w * ((comet ? 0.007 : 0.012) + Math.random() * 0.008),
         vy: w * 0.002,
         hue: 190 + Math.random() * 120,
         seed,
       });
-    } else if (r < 0.7) {
+    } else if (type === 'firework') {
       // firework burst in the sky
       this.skyEvents.push({
         type: 'firework',
@@ -781,7 +901,7 @@ export class Engine {
         hue: Math.random() * 360,
         seed,
       });
-    } else if (r < 0.88) {
+    } else if (type === 'rocket') {
       // rocket launching from behind the mountains
       this.skyEvents.push({
         type: 'rocket',
@@ -794,22 +914,36 @@ export class Engine {
         hue: 25,
         seed,
       });
-    } else {
-      // UFO cruising with a wobble
+    } else if (type === 'ufo' || type === 'heli' || type === 'bird') {
+      // horizontal cruisers with their own bob/flap animation
       const dir = Math.random() < 0.5 ? 1 : -1;
+      const speed =
+        type === 'bird' ? 0.004 : type === 'heli' ? 0.0035 : 0.0028;
       this.skyEvents.push({
-        type: 'ufo',
+        type,
         born: now,
-        dur: 3800,
+        dur: type === 'ufo' ? 3800 : 4500,
         x: dir > 0 ? -w * 0.08 : w * 1.08,
         y: horizonY * (0.15 + Math.random() * 0.55),
-        vx: dir * w * (0.0028 + Math.random() * 0.0015),
+        vx: dir * w * (speed + Math.random() * 0.0015),
         vy: 0,
         hue: 130 + Math.random() * 100,
         seed,
       });
+    } else {
+      // balloon drifting up with a sway
+      this.skyEvents.push({
+        type: 'balloon',
+        born: now,
+        dur: 6000,
+        x: w * (0.1 + Math.random() * 0.8),
+        y: horizonY * 1.0,
+        vx: (Math.random() - 0.5) * w * 0.0004,
+        vy: -horizonY * 0.0022,
+        hue: Math.random() * 360,
+        seed,
+      });
     }
-    void dpr;
   }
 
   private drawSkyEvents(g: CanvasRenderingContext2D): void {
@@ -820,10 +954,10 @@ export class Engine {
     for (const e of this.skyEvents) {
       const age = (now - e.born) / e.dur;
       if (age >= 1) continue;
-      if (e.type === 'star') {
+      if (e.type === 'star' || e.type === 'comet') {
         g.globalCompositeOperation = 'lighter';
         g.globalAlpha = Math.min(1, (1 - age) * 1.5);
-        const tail = 22 * dpr;
+        const tail = (e.type === 'comet' ? 70 : 22) * dpr;
         const grad = g.createLinearGradient(
           e.x - e.vx * tail * 0.1,
           e.y - e.vy * tail * 0.1,
@@ -833,7 +967,7 @@ export class Engine {
         grad.addColorStop(0, 'hsla(0,0%,100%,0)');
         grad.addColorStop(1, `hsla(${e.hue}, 100%, 85%, 0.95)`);
         g.strokeStyle = grad;
-        g.lineWidth = 2 * dpr;
+        g.lineWidth = (e.type === 'comet' ? 3 : 2) * dpr;
         g.beginPath();
         g.moveTo(e.x - e.vx * tail * 0.1, e.y - e.vy * tail * 0.1);
         g.lineTo(e.x, e.y);
@@ -908,6 +1042,82 @@ export class Engine {
         g.lineTo(x + 7 * dpr, e.y + 10 * dpr);
         g.lineTo(x + 3.5 * dpr, e.y + 1 * dpr);
         g.fill();
+      } else if (e.type === 'bird') {
+        // gliding bird silhouette with flapping wings
+        const flap = Math.sin(now / 110 + e.seed) * 5 * dpr;
+        const y = e.y + Math.sin(now / 500 + e.seed) * 6 * dpr;
+        g.globalAlpha = Math.min(1, (1 - age) * 3);
+        g.strokeStyle = 'rgba(18, 22, 38, 0.95)';
+        g.lineWidth = 2 * dpr;
+        g.lineCap = 'round';
+        g.beginPath();
+        g.moveTo(e.x - 7 * dpr, y - flap);
+        g.quadraticCurveTo(e.x - 2 * dpr, y + 2 * dpr, e.x, y);
+        g.quadraticCurveTo(e.x + 2 * dpr, y + 2 * dpr, e.x + 7 * dpr, y - flap);
+        g.stroke();
+      } else if (e.type === 'balloon') {
+        // hot-air balloon drifting upward
+        const x = e.x + Math.sin(now / 700 + e.seed) * 8 * dpr;
+        const r = 9 * dpr;
+        g.globalAlpha = Math.min(1, (1 - age) * 2.5);
+        const env2 = g.createRadialGradient(x - r * 0.3, e.y - r * 0.3, r * 0.2, x, e.y, r);
+        env2.addColorStop(0, `hsl(${e.hue}, 95%, 70%)`);
+        env2.addColorStop(1, `hsl(${e.hue}, 85%, 45%)`);
+        g.fillStyle = env2;
+        g.beginPath();
+        g.arc(x, e.y, r, 0, Math.PI * 2);
+        g.fill();
+        g.strokeStyle = `hsl(${(e.hue + 40) % 360}, 90%, 75%)`;
+        g.lineWidth = 1 * dpr;
+        g.beginPath();
+        g.ellipse(x, e.y, r * 0.45, r, 0, 0, Math.PI * 2);
+        g.stroke();
+        // basket
+        g.strokeStyle = 'rgba(200, 205, 220, 0.7)';
+        g.beginPath();
+        g.moveTo(x - r * 0.4, e.y + r * 0.9);
+        g.lineTo(x - r * 0.25, e.y + r * 1.5);
+        g.moveTo(x + r * 0.4, e.y + r * 0.9);
+        g.lineTo(x + r * 0.25, e.y + r * 1.5);
+        g.stroke();
+        g.fillStyle = '#7a5c3e';
+        g.fillRect(x - r * 0.3, e.y + r * 1.5, r * 0.6, r * 0.4);
+      } else if (e.type === 'heli') {
+        // helicopter with spinning rotor and blinking light
+        const y = e.y + Math.sin(now / 300 + e.seed) * 5 * dpr;
+        const dir = Math.sign(e.vx) || 1;
+        g.globalAlpha = Math.min(1, (1 - age) * 3);
+        g.fillStyle = '#2a3148';
+        g.beginPath();
+        g.ellipse(e.x, y, 8 * dpr, 3.6 * dpr, 0, 0, Math.PI * 2);
+        g.fill();
+        // tail boom + fin
+        g.strokeStyle = '#2a3148';
+        g.lineWidth = 1.8 * dpr;
+        g.beginPath();
+        g.moveTo(e.x - dir * 7 * dpr, y);
+        g.lineTo(e.x - dir * 15 * dpr, y - 1.5 * dpr);
+        g.stroke();
+        // cockpit glint
+        g.fillStyle = 'rgba(150, 230, 255, 0.75)';
+        g.beginPath();
+        g.arc(e.x + dir * 4.5 * dpr, y - 1 * dpr, 2 * dpr, 0, Math.PI * 2);
+        g.fill();
+        // rotor blur
+        const rot = Math.sin(now / 25 + e.seed);
+        g.strokeStyle = `rgba(220, 228, 250, ${0.35 + Math.abs(rot) * 0.4})`;
+        g.lineWidth = 1.2 * dpr;
+        g.beginPath();
+        g.moveTo(e.x - 12 * dpr * Math.abs(rot) - 2 * dpr, y - 5 * dpr);
+        g.lineTo(e.x + 12 * dpr * Math.abs(rot) + 2 * dpr, y - 5 * dpr);
+        g.stroke();
+        // blinking tail light
+        if (Math.floor(now / 220) % 2 === 0) {
+          g.fillStyle = '#ff4d5e';
+          g.beginPath();
+          g.arc(e.x - dir * 15 * dpr, y - 2.5 * dpr, 1.5 * dpr, 0, Math.PI * 2);
+          g.fill();
+        }
       } else {
         // UFO: metallic saucer with dome and blinking lights
         const y = e.y + Math.sin(now / 260 + e.seed) * 9 * dpr;
@@ -957,8 +1167,8 @@ export class Engine {
     const prog = Math.min(1, Math.max(0, t / this.map.duration));
     const env = this.envAt(t);
     const now = performance.now();
-    // Base hue drifts teal → violet → pink as the song intensifies.
-    const hue = 178 + prog * 110;
+    // Base hue is set by the theme and drifts as the song intensifies.
+    const hue = THEME_BASE_HUE[this.theme] + prog * 110;
 
     this.drawBackground(g, t, hue, env);
     this.drawSkyEvents(g);
@@ -997,20 +1207,128 @@ export class Engine {
     }
     g.restore();
 
-    // Sun/moon glow on the horizon, pulsing with the music.
-    const sunR = (this.h * 0.11) * (1 + env * 0.16);
-    const sun = g.createRadialGradient(cx, horizonY, sunR * 0.1, cx, horizonY, sunR * 2.6);
-    sun.addColorStop(0, `hsla(${hue}, 100%, 78%, 0.95)`);
-    sun.addColorStop(0.25, `hsla(${hue}, 95%, 62%, 0.5)`);
-    sun.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
-    g.fillStyle = sun;
-    g.fillRect(cx - sunR * 3, horizonY - sunR * 3, sunR * 6, sunR * 6);
+    // Theme landmark behind the silhouettes.
+    if (this.theme === 'synthwave' || this.theme === 'beach') {
+      // Sun glow on the horizon, pulsing with the music.
+      const sunR = (this.h * (this.theme === 'beach' ? 0.13 : 0.11)) * (1 + env * 0.16);
+      const sun = g.createRadialGradient(cx, horizonY, sunR * 0.1, cx, horizonY, sunR * 2.6);
+      const sunHue = this.theme === 'beach' ? 32 : hue;
+      sun.addColorStop(0, `hsla(${sunHue}, 100%, 78%, 0.95)`);
+      sun.addColorStop(0.25, `hsla(${sunHue}, 95%, 62%, 0.5)`);
+      sun.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
+      g.fillStyle = sun;
+      g.fillRect(cx - sunR * 3, horizonY - sunR * 3, sunR * 6, sunR * 6);
+    } else if (this.theme === 'city') {
+      // Pale moon, upper right.
+      const mx = w * 0.76;
+      const my = horizonY * 0.32;
+      const mr = this.h * 0.035 * (1 + env * 0.06);
+      const glow = g.createRadialGradient(mx, my, mr * 0.3, mx, my, mr * 4);
+      glow.addColorStop(0, 'rgba(235, 240, 255, 0.5)');
+      glow.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = glow;
+      g.fillRect(mx - mr * 4, my - mr * 4, mr * 8, mr * 8);
+      g.fillStyle = '#e9edfa';
+      g.beginPath();
+      g.arc(mx, my, mr, 0, Math.PI * 2);
+      g.fill();
+      g.fillStyle = 'rgba(180, 190, 215, 0.5)';
+      g.beginPath();
+      g.arc(mx - mr * 0.3, my - mr * 0.2, mr * 0.22, 0, Math.PI * 2);
+      g.arc(mx + mr * 0.35, my + mr * 0.3, mr * 0.15, 0, Math.PI * 2);
+      g.fill();
+    } else if (this.theme === 'space') {
+      // Nebula wisps + a big ringed planet.
+      g.save();
+      g.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 2; i++) {
+        const nx = w * (0.25 + i * 0.4) + Math.sin(t * 0.05 + i * 3) * w * 0.02;
+        const ny = horizonY * (0.3 + i * 0.25);
+        const nr = this.h * 0.16;
+        const neb = g.createRadialGradient(nx, ny, 0, nx, ny, nr);
+        neb.addColorStop(0, `hsla(${hue + i * 60}, 90%, 55%, 0.12)`);
+        neb.addColorStop(1, 'hsla(0,0%,0%,0)');
+        g.fillStyle = neb;
+        g.fillRect(nx - nr, ny - nr, nr * 2, nr * 2);
+      }
+      g.restore();
+      const { x: px, y: py, r: pr } = this.planet;
+      const body = g.createRadialGradient(px - pr * 0.4, py - pr * 0.4, pr * 0.2, px, py, pr);
+      body.addColorStop(0, `hsl(${hue + 60}, 65%, 68%)`);
+      body.addColorStop(1, `hsl(${hue + 30}, 60%, 30%)`);
+      g.fillStyle = body;
+      g.beginPath();
+      g.arc(px, py, pr, 0, Math.PI * 2);
+      g.fill();
+      g.strokeStyle = `hsla(${hue + 80}, 80%, 75%, 0.75)`;
+      g.lineWidth = 2.5 * this.dpr;
+      g.beginPath();
+      g.ellipse(px, py, pr * 1.75, pr * 0.42, -0.3, 0, Math.PI * 2);
+      g.stroke();
+    } else if (this.theme === 'aurora') {
+      // Rippling aurora ribbons.
+      g.save();
+      g.globalCompositeOperation = 'lighter';
+      for (let b = 0; b < 3; b++) {
+        g.beginPath();
+        const baseY = horizonY * (0.2 + b * 0.16);
+        const amp = horizonY * 0.09;
+        for (let i = 0; i <= 24; i++) {
+          const rx = (i / 24) * w;
+          const ry = baseY + Math.sin(i * 0.55 + t * (0.6 + b * 0.25) + b * 2.1) * amp;
+          if (i === 0) g.moveTo(rx, ry);
+          else g.lineTo(rx, ry);
+        }
+        for (let i = 24; i >= 0; i--) {
+          const rx = (i / 24) * w;
+          const ry =
+            baseY +
+            Math.sin(i * 0.55 + t * (0.6 + b * 0.25) + b * 2.1) * amp +
+            this.h * 0.055;
+          g.lineTo(rx, ry);
+        }
+        g.closePath();
+        g.fillStyle = `hsla(${125 + b * 35}, 95%, 60%, ${0.09 + env * 0.06})`;
+        g.fill();
+      }
+      g.restore();
+    }
 
-    // Mountain silhouettes
+    // Silhouettes (mountains / skyline / dunes / ridge).
     g.fillStyle = `hsl(${hue + 45}, 45%, 6%)`;
     g.fill(this.mountains[0]);
     g.fillStyle = `hsl(${hue + 45}, 40%, 9%)`;
     g.fill(this.mountains[1]);
+
+    // City windows glitter on top of the skyline.
+    if (this.theme === 'city') {
+      for (let i = 0; i < this.cityWindows.length; i++) {
+        const wd = this.cityWindows[i];
+        const flicker = Math.floor(t * 1.5 + i * 7) % 11 !== 0;
+        if (!flicker) continue;
+        g.fillStyle = i % 5 === 0 ? 'rgba(255, 214, 140, 0.9)' : 'rgba(255, 235, 190, 0.6)';
+        g.fillRect(wd.x, wd.y, 1.6 * this.dpr, 2.2 * this.dpr);
+      }
+    }
+
+    // Ocean shimmer at the beach horizon.
+    if (this.theme === 'beach') {
+      g.save();
+      g.globalCompositeOperation = 'lighter';
+      for (let i = 0; i < 10; i++) {
+        const sy = horizonY + (2 + i * 3.2) * this.dpr;
+        const phase = Math.sin(t * 1.4 + i * 1.9);
+        g.globalAlpha = 0.14 + 0.1 * phase;
+        g.strokeStyle = 'hsl(45, 100%, 78%)';
+        g.lineWidth = 1.2 * this.dpr;
+        const sw = w * (0.1 + 0.06 * phase);
+        g.beginPath();
+        g.moveTo(cx - sw + Math.sin(i * 5) * w * 0.05, sy);
+        g.lineTo(cx + sw + Math.sin(i * 5) * w * 0.05, sy);
+        g.stroke();
+      }
+      g.restore();
+    }
 
     // Rising fireflies
     g.save();
@@ -1600,6 +1918,20 @@ export class Engine {
     g.fillRect(0, 0, w, 3 * dpr);
     g.fillStyle = `hsl(${hue}, 100%, 65%)`;
     g.fillRect(0, 0, w * prog, 3 * dpr);
+
+    // Gauntlet stage badge, top-left
+    if (this.stageLabel) {
+      g.save();
+      g.textAlign = 'left';
+      g.font = `900 ${Math.round(13 * dpr)}px ${COMIC_FONT}`;
+      g.lineJoin = 'round';
+      g.lineWidth = 4 * dpr;
+      g.strokeStyle = 'rgba(8, 5, 28, 0.9)';
+      g.strokeText(this.stageLabel, 12 * dpr, 26 * dpr);
+      g.fillStyle = `hsl(${hue + 40}, 100%, 75%)`;
+      g.fillText(this.stageLabel, 12 * dpr, 26 * dpr);
+      g.restore();
+    }
 
     // Big bouncy score, centered at the top. While a hold is being ridden it
     // grows larger and blinks gold to sell the rapid accumulation.

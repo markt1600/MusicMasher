@@ -18,9 +18,32 @@ import type { Beatmap, GameStats } from '@/lib/types';
 type Phase = 'loading' | 'ready' | 'playing' | 'paused' | 'results' | 'error';
 
 const OFFSET_KEY = 'mm-offset-ms';
+const RUN_TOTAL_KEY = 'mm-run-total';
+const RUN_CLEAR_ACC = 60; // % accuracy needed to advance a gauntlet stage
 
 // The demo chart never changes — analyze it once per page session.
 let demoMapCache: Beatmap | null = null;
+
+/** Stable background theme per song outside gauntlet runs. */
+function themeForSong(songId: string): number {
+  let h = 0;
+  for (let i = 0; i < songId.length; i++) h = (h * 31 + songId.charCodeAt(i)) | 0;
+  return Math.abs(h) % 5;
+}
+
+async function pickRandomSongId(excludeId?: string): Promise<string> {
+  try {
+    const res = await fetch('/api/songs', { cache: 'no-store' });
+    const data = await res.json();
+    const all: { id: string }[] = data.songs ?? [];
+    const pool = all.filter((s) => s.id !== excludeId);
+    if (pool.length > 0) return pool[Math.floor(Math.random() * pool.length)].id;
+    if (all.length > 0) return all[0].id;
+  } catch {
+    // fall through
+  }
+  return 'demo';
+}
 
 function accuracy(stats: GameStats): number {
   if (stats.totalNotes === 0) return 100;
@@ -40,8 +63,18 @@ function grade(stats: GameStats): string {
   return 'D';
 }
 
-export default function GameScreen({ songId }: { songId: string }) {
+export default function GameScreen({
+  songId,
+  runStage = 0,
+}: {
+  songId: string;
+  /** 0 = normal play; 1..5 = gauntlet stage. */
+  runStage?: number;
+}) {
   const router = useRouter();
+  const inRun = runStage > 0;
+  const difficulty = inRun ? runStage : 1;
+  const theme = inRun ? (runStage - 1) % 5 : themeForSong(songId);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const audioCtxRef = useRef<AudioContext | null>(null);
   const bufferRef = useRef<AudioBuffer | null>(null);
@@ -67,6 +100,8 @@ export default function GameScreen({ songId }: { songId: string }) {
   const [globalBest, setGlobalBest] = useState<{ name: string; score: number } | null>(null);
   const [isRecord, setIsRecord] = useState(false);
   const scorePosted = useRef(false);
+  const [runTotal, setRunTotal] = useState(0);
+  const [advancing, setAdvancing] = useState(false);
 
   // ---------------------------------------------------------------------
   // Load: fetch (or synthesize) audio → decode → analyze beats
@@ -118,20 +153,24 @@ export default function GameScreen({ songId }: { songId: string }) {
         if (cancelled) return;
 
         let map: Beatmap;
-        if (songId === 'demo' && demoMapCache) {
+        if (songId === 'demo' && difficulty === 1 && demoMapCache) {
           map = demoMapCache;
         } else {
           setLoadingMsg('Analyzing beats…');
           setAnalyzePct(0);
-          map = await analyzeAudio(buffer, (p) => {
-            if (!cancelled) setAnalyzePct(Math.round(p * 100));
-          });
+          map = await analyzeAudio(
+            buffer,
+            (p) => {
+              if (!cancelled) setAnalyzePct(Math.round(p * 100));
+            },
+            difficulty
+          );
         }
         if (cancelled) return;
         if (map.notes.length === 0) {
           throw new Error("Couldn't find a beat in this song.");
         }
-        if (songId === 'demo') demoMapCache = map;
+        if (songId === 'demo' && difficulty === 1) demoMapCache = map;
         console.log(
           '[MusicMasher] chart:',
           `${map.notes.length} notes,`,
@@ -140,6 +179,8 @@ export default function GameScreen({ songId }: { songId: string }) {
           `${map.notes.filter((n) => n.kind === 'bonus').length} gems,`,
           `${Math.round(map.bpm)} bpm`
         );
+        // Debug/testing hook: the resolved chart for the current song.
+        (window as unknown as Record<string, unknown>).__mmChart = map.notes;
 
         bufferRef.current = buffer;
         beatmapRef.current = map;
@@ -159,7 +200,7 @@ export default function GameScreen({ songId }: { songId: string }) {
       engineRef.current = null;
       void audioCtx.close();
     };
-  }, [songId]);
+  }, [songId, difficulty]);
 
   // Auto-pause when the tab is hidden mid-game.
   useEffect(() => {
@@ -204,23 +245,45 @@ export default function GameScreen({ songId }: { songId: string }) {
 
     await audioCtx.resume(); // requires the user gesture we're inside of
 
-    const engine = new Engine(canvas, audioCtx, buffer, map, title, {
-      onEnd: (s) => {
-        setStats(s);
-        setBestResult(
-          submitScore(songId, {
-            score: s.score,
-            acc: accuracy(s),
-            maxCombo: s.maxCombo,
-            grade: grade(s),
-          })
-        );
-        setPhase('results');
-        engineRef.current?.destroy();
-        engineRef.current = null;
+    const engine = new Engine(
+      canvas,
+      audioCtx,
+      buffer,
+      map,
+      title,
+      {
+        onEnd: (s) => {
+          setStats(s);
+          // Personal/global bests only count on normal difficulty — gauntlet
+          // charts are denser and faster, so scores aren't comparable.
+          if (difficulty === 1) {
+            setBestResult(
+              submitScore(songId, {
+                score: s.score,
+                acc: accuracy(s),
+                maxCombo: s.maxCombo,
+                grade: grade(s),
+              })
+            );
+          }
+          if (inRun) {
+            const prev = Number(sessionStorage.getItem(RUN_TOTAL_KEY) ?? 0) || 0;
+            const total = prev + s.score;
+            sessionStorage.setItem(RUN_TOTAL_KEY, String(total));
+            setRunTotal(total);
+          }
+          setPhase('results');
+          engineRef.current?.destroy();
+          engineRef.current = null;
+        },
+        onPauseRequest: () => setPhase('paused'),
       },
-      onPauseRequest: () => setPhase('paused'),
-    });
+      {
+        theme,
+        difficulty,
+        stageLabel: inRun ? `STAGE ${runStage}/5` : '',
+      }
+    );
     engine.offsetMs = Number(localStorage.getItem(OFFSET_KEY) ?? 0) || 0;
     engineRef.current = engine;
     engine.start();
@@ -231,7 +294,20 @@ export default function GameScreen({ songId }: { songId: string }) {
       playCounted.current = true;
       void fetch(`/api/songs/${songId}/play`, { method: 'POST' }).catch(() => {});
     }
-  }, [songId, title]);
+  }, [difficulty, inRun, runStage, songId, theme, title]);
+
+  const nextStage = useCallback(async () => {
+    setAdvancing(true);
+    const next = await pickRandomSongId(songId);
+    router.push(`/play/${next}?run=1&stage=${runStage + 1}`);
+  }, [router, runStage, songId]);
+
+  const startGauntlet = useCallback(async () => {
+    setAdvancing(true);
+    sessionStorage.setItem(RUN_TOTAL_KEY, '0');
+    const first = await pickRandomSongId();
+    router.push(`/play/${first}?run=1&stage=1`);
+  }, [router]);
 
   const postScore = useCallback(
     async (name: string, s: GameStats) => {
@@ -263,11 +339,18 @@ export default function GameScreen({ songId }: { songId: string }) {
   );
 
   // Auto-post once the results screen shows, when we already know the player.
+  // Gauntlet stages past 1 use harder charts, so they don't post.
   useEffect(() => {
-    if (phase === 'results' && stats && player && !scorePosted.current) {
+    if (
+      phase === 'results' &&
+      stats &&
+      player &&
+      difficulty === 1 &&
+      !scorePosted.current
+    ) {
       void postScore(player, stats);
     }
-  }, [phase, player, postScore, stats]);
+  }, [difficulty, phase, player, postScore, stats]);
 
   const savePlayerName = useCallback(() => {
     const name = nameDraft.trim().slice(0, 16);
@@ -388,14 +471,33 @@ export default function GameScreen({ songId }: { songId: string }) {
 
       {phase === 'results' && stats && (
         <div className="overlay">
-          {isRecord ? (
-            <div className="new-best world-record">🌍 WORLD RECORD!</div>
-          ) : (
-            bestResult?.newBest && <div className="new-best">🏆 NEW BEST!</div>
+          {inRun && accuracy(stats) >= RUN_CLEAR_ACC && runStage === 5 && (
+            <div className="new-best win-title">🏆 YOU BEAT THE GAUNTLET!</div>
           )}
+          {inRun && accuracy(stats) >= RUN_CLEAR_ACC && runStage < 5 && (
+            <div className="new-best stage-clear">
+              ✅ STAGE {runStage} CLEAR!
+            </div>
+          )}
+          {inRun && accuracy(stats) < RUN_CLEAR_ACC && (
+            <div className="new-best run-over">
+              💔 RUN OVER — STAGE {runStage}/5
+            </div>
+          )}
+          {!inRun &&
+            (isRecord ? (
+              <div className="new-best world-record">🌍 WORLD RECORD!</div>
+            ) : (
+              bestResult?.newBest && <div className="new-best">🏆 NEW BEST!</div>
+            ))}
           <div className="grade">{grade(stats)}</div>
           <div className="result-score">{stats.score.toLocaleString()}</div>
-          {!bestResult?.newBest && (
+          {inRun && (
+            <p className="subtle best-line run-line">
+              ⚔️ Run total: <b>{runTotal.toLocaleString()}</b>
+            </p>
+          )}
+          {!inRun && !bestResult?.newBest && (
             <p className="subtle best-line">
               Your best: {(bestResult?.prev ?? getBest(songId))?.score.toLocaleString() ?? '—'}
             </p>
@@ -405,7 +507,7 @@ export default function GameScreen({ songId }: { songId: string }) {
               🌍 World best: {globalBest.score.toLocaleString()} by {globalBest.name}
             </p>
           )}
-          {!player && (
+          {!player && difficulty === 1 && (
             <div className="name-form">
               <input
                 type="text"
@@ -444,12 +546,42 @@ export default function GameScreen({ songId }: { songId: string }) {
               <span>Miss</span>
             </div>
           </div>
-          <button className="big-btn" onClick={() => void startGame()}>
-            ↻ &nbsp;Play again
-          </button>
-          <button className="ghost-btn" onClick={exit}>
-            ♫ &nbsp;Choose another song
-          </button>
+          {inRun && accuracy(stats) >= RUN_CLEAR_ACC && runStage < 5 ? (
+            <>
+              <button
+                className="big-btn"
+                disabled={advancing}
+                onClick={() => void nextStage()}
+              >
+                {advancing ? 'Loading…' : `▶  Stage ${runStage + 1}`}
+              </button>
+              <button className="ghost-btn" onClick={exit}>
+                End run
+              </button>
+            </>
+          ) : inRun ? (
+            <>
+              <button
+                className="big-btn"
+                disabled={advancing}
+                onClick={() => void startGauntlet()}
+              >
+                {advancing ? 'Loading…' : '⚔️  New gauntlet'}
+              </button>
+              <button className="ghost-btn" onClick={exit}>
+                ♫ &nbsp;Back to library
+              </button>
+            </>
+          ) : (
+            <>
+              <button className="big-btn" onClick={() => void startGame()}>
+                ↻ &nbsp;Play again
+              </button>
+              <button className="ghost-btn" onClick={exit}>
+                ♫ &nbsp;Choose another song
+              </button>
+            </>
+          )}
         </div>
       )}
     </div>
