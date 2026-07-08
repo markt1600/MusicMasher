@@ -91,10 +91,9 @@ piece of setup.
 ## Admin
 
 `/admin` (also linked from the library footer) lets you edit song titles and
-artists, and delete uploaded songs.
-The default password is `yippy`; set the `ADMIN_PASSWORD` environment variable
-in Vercel to change it. Deletion removes both the audio and its metadata for
-everyone.
+artists, and delete uploaded songs. It's password-protected — set the
+`ADMIN_PASSWORD` environment variable in Vercel to configure the password.
+Deletion removes both the audio and its metadata for everyone.
 
 ## Notes
 
