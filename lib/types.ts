@@ -11,14 +11,22 @@ export interface SongMeta {
   ext?: string;
   size: number;
   createdAt: string;
+  /** Total times this song has been started (all players). */
+  plays?: number;
 }
 
-/** A single tappable tile. */
+export type NoteKind = 'tap' | 'double' | 'hold' | 'bonus';
+
+/** A single tile. */
 export interface Note {
   /** Time in seconds (relative to audio start) when the tile crosses the hit line. */
   t: number;
   /** Lane index 0..2 */
   lane: number;
+  /** Tile type; absent means a normal tap. */
+  kind?: NoteKind;
+  /** Hold duration in seconds (kind === 'hold'). */
+  dur?: number;
 }
 
 export interface Beatmap {

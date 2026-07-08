@@ -53,7 +53,21 @@ function laneHue(lane: number, prog: number): number {
 interface ActiveNote extends Note {
   judged: Judgement | null;
   judgedAt: number;
+  /** double: taps received so far (needs 2). */
+  tapsGot: number;
+  /** double: |dt| of the first tap, used to grade the pair. */
+  tapDt?: number;
+  /** hold: currently being held down. */
+  holding: boolean;
+  /** hold: resolved (bonus decided), with timestamp for the fade-out. */
+  holdDone: boolean;
+  holdDoneAt: number;
+  /** hold: song-time when the lane was released (0 = held to the end). */
+  releasedT: number;
 }
+
+/** Extra time (s) after a double's hit moment to land the second tap. */
+const DOUBLE_EXTRA = 0.5;
 
 interface Particle {
   x: number;
@@ -93,6 +107,16 @@ function easeOutCubic(x: number): number {
   return 1 - (1 - x) ** 3;
 }
 
+function easeOutBack(x: number): number {
+  const c = 1.70158;
+  return 1 + (c + 1) * (x - 1) ** 3 + c * (x - 1) ** 2;
+}
+
+/** Chunky, playful font stack for the score and celebration popups. */
+const COMIC_FONT =
+  `'Comic Sans MS', 'Chalkboard SE', 'Comic Neue', 'Marker Felt', ` +
+  `ui-rounded, system-ui, sans-serif`;
+
 export class Engine {
   private canvas: HTMLCanvasElement;
   private g: CanvasRenderingContext2D;
@@ -121,12 +145,21 @@ export class Engine {
   private counts: Record<Judgement, number> = { perfect: 0, great: 0, good: 0, miss: 0 };
   private lastComboChange = -10;
   private lastMissAt = -10;
+  private lastScoreAt = -10;
+  private lastMilestoneAt = -10;
+  private popups: { born: number; title: string; sub: string }[] = [];
 
   // effects
   private particles: Particle[] = [];
   private rings: Ring[] = [];
   private texts: FloatText[] = [];
   private pressUntil = new Float64Array(LANES);
+
+  // hold-note input state
+  private laneHeld = new Int8Array(LANES); // count of pointers+keys down
+  private pointerLanes = new Map<number, number>();
+  private keysDown = new Set<string>();
+  private liveHolds: ActiveNote[] = [];
 
   // layout (recomputed on resize)
   private w = 0;
@@ -162,14 +195,26 @@ export class Engine {
     this.cb = cb;
     this.notes = [...map.notes]
       .sort((a, b) => a.t - b.t)
-      .map((n) => ({ ...n, judged: null, judgedAt: 0 }));
+      .map((n) => ({
+        ...n,
+        judged: null,
+        judgedAt: 0,
+        tapsGot: 0,
+        holding: false,
+        holdDone: false,
+        holdDoneAt: 0,
+        releasedT: 0,
+      }));
 
     this.handleResize();
     this.resizeObserver = new ResizeObserver(() => this.handleResize());
     this.resizeObserver.observe(canvas);
 
     canvas.addEventListener('pointerdown', this.onPointerDown);
+    window.addEventListener('pointerup', this.onPointerUp);
+    window.addEventListener('pointercancel', this.onPointerUp);
     window.addEventListener('keydown', this.onKeyDown);
+    window.addEventListener('keyup', this.onKeyUp);
   }
 
   // -------------------------------------------------------------------------
@@ -211,7 +256,10 @@ export class Engine {
     this.source?.disconnect();
     this.resizeObserver?.disconnect();
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
+    window.removeEventListener('pointerup', this.onPointerUp);
+    window.removeEventListener('pointercancel', this.onPointerUp);
     window.removeEventListener('keydown', this.onKeyDown);
+    window.removeEventListener('keyup', this.onKeyUp);
   }
 
   private songTime(): number {
@@ -258,7 +306,17 @@ export class Engine {
     }
     if (this.paused || this.ended) return;
     const lane = Math.max(0, Math.min(LANES - 1, Math.floor((x / this.w) * LANES)));
+    this.pointerLanes.set(e.pointerId, lane);
+    this.laneHeld[lane]++;
     this.tapLane(lane);
+  };
+
+  private onPointerUp = (e: PointerEvent) => {
+    const lane = this.pointerLanes.get(e.pointerId);
+    if (lane === undefined) return;
+    this.pointerLanes.delete(e.pointerId);
+    this.laneHeld[lane] = Math.max(0, this.laneHeld[lane] - 1);
+    if (this.laneHeld[lane] === 0) this.releaseLane(lane);
   };
 
   private onKeyDown = (e: KeyboardEvent) => {
@@ -272,20 +330,76 @@ export class Engine {
       return;
     }
     if (this.paused || this.ended) return;
-    let lane = -1;
-    if (k === 'a' || k === 'j' || k === 'arrowleft' || k === '1') lane = 0;
-    else if (k === 's' || k === 'k' || k === 'arrowdown' || k === '2') lane = 1;
-    else if (k === 'd' || k === 'l' || k === 'arrowright' || k === '3') lane = 2;
-    if (lane >= 0) {
+    const lane = keyLane(k);
+    if (lane >= 0 && !this.keysDown.has(k)) {
       e.preventDefault();
+      this.keysDown.add(k);
+      this.laneHeld[lane]++;
       this.tapLane(lane);
     }
   };
+
+  private onKeyUp = (e: KeyboardEvent) => {
+    const k = e.key.toLowerCase();
+    if (!this.keysDown.has(k)) return;
+    this.keysDown.delete(k);
+    const lane = keyLane(k);
+    if (lane >= 0) {
+      this.laneHeld[lane] = Math.max(0, this.laneHeld[lane] - 1);
+      if (this.laneHeld[lane] === 0) this.releaseLane(lane);
+    }
+  };
+
+  /** A lane went fully up — settle any hold riding it. */
+  private releaseLane(lane: number): void {
+    const t = this.songTime() - this.offsetMs / 1000;
+    for (const n of this.liveHolds) {
+      if (n.lane === lane && n.holding && !n.holdDone) {
+        n.holding = false;
+        this.finishHold(n, t);
+      }
+    }
+  }
+
+  private finishHold(n: ActiveNote, endT: number): void {
+    if (n.holdDone) return;
+    n.holdDone = true;
+    n.holdDoneAt = performance.now();
+    n.releasedT = endT;
+    const dur = n.dur ?? 1;
+    const ratio = Math.max(0, Math.min(1, (endT - n.t) / dur));
+    if (ratio >= 0.65) {
+      const mult = 1 + Math.min(this.combo, 100) / 100;
+      this.score += 80 * ratio * mult;
+      this.lastScoreAt = n.holdDoneAt;
+      this.texts.push({
+        lane: n.lane,
+        born: n.holdDoneAt,
+        text: 'HOLD ✓',
+        color: '#9dffc9',
+      });
+      this.spawnHitEffects(n.lane, 'great');
+    }
+  }
 
   private tapLane(lane: number): void {
     const now = performance.now();
     this.pressUntil[lane] = now + 130;
     const t = this.songTime() - this.offsetMs / 1000;
+
+    // A double waiting for its second tap takes priority.
+    for (let i = this.nextJudgeIdx; i < this.notes.length; i++) {
+      const n = this.notes[i];
+      if (n.t > t + WINDOW_GOOD + 0.05) break;
+      if (n.judged || n.lane !== lane) continue;
+      if (n.kind === 'double' && n.tapsGot === 1 && t <= n.t + DOUBLE_EXTRA) {
+        // The pair is graded by the first tap's timing.
+        const judgement: Judgement =
+          n.tapDt! <= WINDOW_PERFECT ? 'perfect' : n.tapDt! <= WINDOW_GREAT ? 'great' : 'good';
+        this.judge(n, judgement);
+        return;
+      }
+    }
 
     // Find the closest unjudged note in this lane within the good window.
     let best: ActiveNote | null = null;
@@ -293,7 +407,7 @@ export class Engine {
     for (let i = this.nextJudgeIdx; i < this.notes.length; i++) {
       const n = this.notes[i];
       if (n.t > t + WINDOW_GOOD + 0.05) break;
-      if (n.judged || n.lane !== lane) continue;
+      if (n.judged || n.lane !== lane || (n.kind === 'double' && n.tapsGot > 0)) continue;
       const abs = Math.abs(n.t - t);
       if (abs <= WINDOW_GOOD && abs < bestAbs) {
         best = n;
@@ -307,9 +421,28 @@ export class Engine {
       return;
     }
 
+    if (best.kind === 'double') {
+      // First of two taps: flash, remember the timing, wait for the second.
+      best.tapsGot = 1;
+      best.tapDt = bestAbs;
+      this.rings.push({
+        lane,
+        born: now,
+        color: `hsl(${LANE_HUES[lane]}, 100%, 75%)`,
+        ghost: false,
+      });
+      return;
+    }
+
     const judgement: Judgement =
       bestAbs <= WINDOW_PERFECT ? 'perfect' : bestAbs <= WINDOW_GREAT ? 'great' : 'good';
     this.judge(best, judgement);
+
+    // Holds start riding once the head is hit.
+    if (best.kind === 'hold') {
+      best.holding = true;
+      this.liveHolds.push(best);
+    }
   }
 
   private judge(note: ActiveNote, j: Judgement): void {
@@ -325,9 +458,34 @@ export class Engine {
       this.combo++;
       this.maxCombo = Math.max(this.maxCombo, this.combo);
       this.lastComboChange = note.judgedAt;
+      this.lastScoreAt = note.judgedAt;
       const mult = 1 + Math.min(this.combo, 100) / 100;
       this.score += SCORE_VALUE[j] * mult;
       this.spawnHitEffects(note.lane, j);
+      if (note.kind === 'bonus') {
+        this.score += 300 * mult;
+        this.popups.push({
+          born: note.judgedAt,
+          title: 'BONUS! ✦',
+          sub: `+${Math.round(300 * mult)}`,
+        });
+        this.lastMilestoneAt = note.judgedAt;
+        for (let i = 0; i < 24; i++) {
+          const a = (i / 24) * Math.PI * 2;
+          const sp = (0.7 + Math.random() * 1.2) * this.w * 0.004;
+          this.particles.push({
+            x: this.laneX(note.lane, 1),
+            y: this.hitY,
+            vx: Math.cos(a) * sp,
+            vy: Math.sin(a) * sp * 0.7 - this.w * 0.002,
+            life: 0,
+            maxLife: 600 + Math.random() * 400,
+            size: (2 + Math.random() * 4) * this.dpr,
+            hue: 45 + Math.random() * 30,
+          });
+        }
+      }
+      this.checkMilestone(note.judgedAt);
     }
     this.texts.push({
       lane: note.lane,
@@ -335,6 +493,42 @@ export class Engine {
       text: JUDGE_LABEL[j],
       color: JUDGE_COLOR[j],
     });
+  }
+
+  /** Escalating combo-milestone celebration: popup + firework burst. */
+  private checkMilestone(now: number): void {
+    const words: [number, string][] = [
+      [10, 'NICE!'],
+      [20, 'GREAT!'],
+      [30, 'AWESOME!'],
+      [50, 'ON FIRE! 🔥'],
+      [75, 'BLAZING!'],
+      [100, 'UNSTOPPABLE!'],
+      [150, 'GODLIKE!'],
+      [200, 'LEGENDARY!'],
+      [300, 'LEGENDARY!'],
+      [400, 'LEGENDARY!'],
+      [500, 'LEGENDARY!'],
+    ];
+    const hit = words.find(([c]) => c === this.combo);
+    if (!hit) return;
+    this.popups.push({ born: now, title: hit[1], sub: `${this.combo} COMBO` });
+    this.lastMilestoneAt = now;
+    // Firework burst from the middle of the road.
+    for (let i = 0; i < 36; i++) {
+      const a = (i / 36) * Math.PI * 2;
+      const sp = (0.8 + Math.random() * 1.4) * this.w * 0.004;
+      this.particles.push({
+        x: this.cx,
+        y: this.h * 0.42,
+        vx: Math.cos(a) * sp,
+        vy: Math.sin(a) * sp * 0.7,
+        life: 0,
+        maxLife: 600 + Math.random() * 400,
+        size: (2 + Math.random() * 4) * this.dpr,
+        hue: LANE_HUES[i % 3] + Math.random() * 20,
+      });
+    }
   }
 
   private spawnHitEffects(lane: number, j: Judgement): void {
@@ -446,11 +640,29 @@ export class Engine {
   private update(): void {
     const t = this.songTime() - this.offsetMs / 1000;
 
-    // Auto-miss notes that scrolled past the window.
+    // Auto-miss notes that scrolled past the window. Doubles get extra time
+    // for their second tap; one-of-two lands as a 'good'.
     for (let i = this.nextJudgeIdx; i < this.notes.length; i++) {
       const n = this.notes[i];
       if (n.t > t - WINDOW_GOOD) break;
-      if (!n.judged) this.judge(n, 'miss');
+      if (n.judged) continue;
+      if (n.kind === 'double') {
+        if (t < n.t + DOUBLE_EXTRA + 0.05) continue; // still tappable
+        this.judge(n, n.tapsGot >= 1 ? 'good' : 'miss');
+      } else {
+        this.judge(n, 'miss');
+      }
+    }
+
+    // Settle holds that were ridden all the way to the end.
+    for (let i = this.liveHolds.length - 1; i >= 0; i--) {
+      const n = this.liveHolds[i];
+      if (!n.holdDone && n.holding && t >= n.t + (n.dur ?? 0)) {
+        this.finishHold(n, n.t + (n.dur ?? 0));
+      }
+      if (n.holdDone && performance.now() - n.holdDoneAt > 400) {
+        this.liveHolds.splice(i, 1);
+      }
     }
     // Advance the search base past fully-judged prefix.
     while (this.nextJudgeIdx < this.notes.length && this.notes[this.nextJudgeIdx].judged) {
@@ -474,6 +686,7 @@ export class Engine {
     const now = performance.now();
     this.rings = this.rings.filter((r) => now - r.born < 450);
     this.texts = this.texts.filter((tx) => now - tx.born < 700);
+    this.popups = this.popups.filter((p) => now - p.born < 1300);
 
     // Song end.
     if (!this.ended && this.songTime() > this.map.duration + 0.6) {
@@ -655,8 +868,14 @@ export class Engine {
     for (const n of this.notes) {
       const d = (n.t - tJudge) / approach;
       if (d > 1.05) break; // notes sorted by time; rest are farther out
-      if (d < -0.12) continue;
       const hue = laneHue(n.lane, prog);
+
+      if (n.kind === 'hold') {
+        this.drawHold(g, n, d, approach, hue, tJudge);
+        continue;
+      }
+      if (d < -0.12) continue;
+
       if (n.judged && n.judged !== 'miss') {
         // brief shrink-out at the hit line
         const age = (performance.now() - n.judgedAt) / 160;
@@ -665,14 +884,198 @@ export class Engine {
         this.drawTile(g, n.lane, pr, this.proj(TILE_LEN), hue, 1 - age, 1 + age * 0.4);
         continue;
       }
+
+      // Bonus gem: spinning faceted jewel.
+      if (n.kind === 'bonus' && !n.judged) {
+        this.drawGem(g, n.lane, d);
+        continue;
+      }
+
+      // Double waiting for its second tap: pinned at the line, pulsing.
+      if (n.kind === 'double' && n.tapsGot === 1 && !n.judged) {
+        const dp = Math.max(d, 0);
+        const pulse = 1 + 0.06 * Math.sin(performance.now() / 45);
+        this.drawTile(g, n.lane, this.proj(dp), this.proj(dp + TILE_LEN), hue, 1, pulse, false, true);
+        continue;
+      }
+
       const missed = n.judged === 'miss';
       const prNear = this.proj(d);
       const prFar = this.proj(d + TILE_LEN);
       const alpha = missed ? Math.max(0, 0.7 - (performance.now() - n.judgedAt) / 280) : 1;
       if (alpha <= 0) continue;
-      this.drawTile(g, n.lane, prNear, prFar, missed ? -40 : hue, alpha, 1, missed);
+      this.drawTile(
+        g,
+        n.lane,
+        prNear,
+        prFar,
+        missed ? -40 : hue,
+        alpha,
+        1,
+        missed,
+        n.kind === 'double'
+      );
     }
     g.restore();
+  }
+
+  /** Bonus gem: an iridescent faceted jewel that spins as it approaches. */
+  private drawGem(g: CanvasRenderingContext2D, lane: number, d: number): void {
+    const pr = this.proj(d + TILE_LEN / 2);
+    const x = this.laneX(lane, pr);
+    const y = this.yAt(pr);
+    const now = performance.now();
+    const s = this.laneW * 0.34 * pr;
+    if (s < 2) return;
+    // fake Y-axis spin by squashing horizontally
+    const spin = 0.45 + 0.55 * Math.abs(Math.cos(now / 350 + lane * 2));
+    const hue = (now / 12 + lane * 60) % 360; // slow iridescent cycle
+    const rx = s * 0.85 * spin;
+    const ry = s * 0.62;
+
+    // halo
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    const halo = g.createRadialGradient(x, y, s * 0.2, x, y, s * 2.2);
+    halo.addColorStop(0, `hsla(${hue}, 100%, 75%, ${0.5 + 0.2 * Math.sin(now / 120)})`);
+    halo.addColorStop(1, 'hsla(0,0%,0%,0)');
+    g.fillStyle = halo;
+    g.fillRect(x - s * 2.2, y - s * 2.2, s * 4.4, s * 4.4);
+    g.restore();
+
+    // faceted diamond: four triangles from the center, each lit differently
+    const pts = [
+      [x, y - ry], // top
+      [x + rx, y], // right
+      [x, y + ry], // bottom
+      [x - rx, y], // left
+    ];
+    const light = [82, 60, 45, 68];
+    for (let i = 0; i < 4; i++) {
+      const a = pts[i];
+      const b = pts[(i + 1) % 4];
+      g.fillStyle = `hsl(${(hue + i * 14) % 360}, 95%, ${light[i]}%)`;
+      g.beginPath();
+      g.moveTo(x, y);
+      g.lineTo(a[0], a[1]);
+      g.lineTo(b[0], b[1]);
+      g.closePath();
+      g.fill();
+    }
+    g.strokeStyle = `hsla(${hue}, 100%, 88%, 0.95)`;
+    g.lineWidth = Math.max(1, 1.4 * pr * this.dpr);
+    g.beginPath();
+    g.moveTo(pts[0][0], pts[0][1]);
+    for (let i = 1; i < 4; i++) g.lineTo(pts[i][0], pts[i][1]);
+    g.closePath();
+    g.stroke();
+
+    // glint
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    g.fillStyle = 'rgba(255,255,255,0.9)';
+    g.beginPath();
+    g.arc(x - rx * 0.3, y - ry * 0.35, Math.max(1, s * 0.1), 0, Math.PI * 2);
+    g.fill();
+    g.restore();
+
+    // trailing sparkles
+    if (Math.random() < 0.25) {
+      this.particles.push({
+        x: x + (Math.random() - 0.5) * rx * 1.6,
+        y: y + (Math.random() - 0.5) * ry * 1.6,
+        vx: (Math.random() - 0.5) * this.w * 0.001,
+        vy: -this.w * 0.001,
+        life: 0,
+        maxLife: 350,
+        size: (1 + Math.random() * 2) * this.dpr,
+        hue,
+      });
+    }
+  }
+
+  /** Hold tile: a head cap plus a glowing tail lasting `dur` seconds. While
+   * ridden, the head pins to the hit line and the tail feeds into it. */
+  private drawHold(
+    g: CanvasRenderingContext2D,
+    n: ActiveNote,
+    dHead: number,
+    approach: number,
+    hue: number,
+    tJudge: number
+  ): void {
+    const dur = n.dur ?? 0.5;
+    const dTail = (n.t + dur - tJudge) / approach;
+    if (dTail < -0.12) return;
+
+    const now = performance.now();
+    let alpha = 1;
+    if (n.judged === 'miss') {
+      alpha = Math.max(0, 0.7 - (now - n.judgedAt) / 280);
+      hue = -40;
+    } else if (n.holdDone) {
+      alpha = Math.max(0, 1 - (now - n.holdDoneAt) / 300);
+    }
+    if (alpha <= 0) return;
+
+    const riding = n.judged && n.judged !== 'miss' && !n.holdDone;
+    const dH = riding ? Math.max(dHead, 0) : dHead;
+    if (dH < -0.12 && !riding) return;
+
+    const prHead = this.proj(Math.max(dH, -0.1));
+    const prTail = this.proj(Math.min(dTail, 1.05));
+
+    // Tail body: narrower, translucent, with bright rails.
+    const yH = this.yAt(prHead);
+    const yT = this.yAt(prTail);
+    const cxH = this.laneX(n.lane, prHead);
+    const cxT = this.laneX(n.lane, prTail);
+    const halfH = this.laneW * 0.2 * prHead;
+    const halfT = this.laneW * 0.2 * prTail;
+
+    g.globalAlpha = alpha * (riding ? 0.85 : 0.55);
+    const grad = g.createLinearGradient(0, yT, 0, yH);
+    grad.addColorStop(0, `hsla(${hue}, 90%, 55%, 0.5)`);
+    grad.addColorStop(1, `hsla(${hue}, 100%, ${riding ? 75 : 62}%, 0.9)`);
+    g.fillStyle = grad;
+    g.beginPath();
+    g.moveTo(cxT - halfT, yT);
+    g.lineTo(cxT + halfT, yT);
+    g.lineTo(cxH + halfH, yH);
+    g.lineTo(cxH - halfH, yH);
+    g.closePath();
+    g.fill();
+    g.strokeStyle = `hsla(${hue}, 100%, 80%, ${0.8 * alpha})`;
+    g.lineWidth = Math.max(1, 1.2 * prHead * this.dpr);
+    g.stroke();
+    g.globalAlpha = 1;
+
+    // Head cap.
+    this.drawTile(
+      g,
+      n.lane,
+      prHead,
+      this.proj(Math.max(dH, -0.1) + TILE_LEN * 0.8),
+      hue,
+      alpha,
+      riding ? 1 + 0.05 * Math.sin(now / 40) : 1,
+      n.judged === 'miss'
+    );
+
+    // Sparks while riding.
+    if (riding && Math.random() < 0.35) {
+      const x = this.laneX(n.lane, 1);
+      this.particles.push({
+        x: x + (Math.random() - 0.5) * this.laneW * 0.4,
+        y: this.hitY,
+        vx: (Math.random() - 0.5) * this.w * 0.002,
+        vy: -this.w * (0.002 + Math.random() * 0.003),
+        life: 0,
+        maxLife: 300 + Math.random() * 200,
+        size: (1.5 + Math.random() * 2.5) * this.dpr,
+        hue: LANE_HUES[n.lane],
+      });
+    }
   }
 
   private drawTile(
@@ -683,7 +1086,8 @@ export class Engine {
     hue: number,
     alpha: number,
     scale = 1,
-    missed = false
+    missed = false,
+    split = false
   ): void {
     const yN = this.yAt(prNear);
     const yF = this.yAt(prFar);
@@ -741,6 +1145,26 @@ export class Engine {
       g.lineTo(cxF - halfF * 0.2, yF + (yN - yF) * 0.15);
       g.lineTo(cxN - halfN * 0.2, yN - (yN - yF) * 0.12);
       g.lineTo(cxN - halfN * 0.55, yN - (yN - yF) * 0.12);
+      g.closePath();
+      g.fill();
+    }
+
+    // Double-tap tile: split into two segments so it reads "tap twice".
+    if (split && halfN > 4) {
+      const seg = (fr: number) => ({
+        y: yF + (yN - yF) * fr,
+        cx: cxF + (cxN - cxF) * fr,
+        half: halfF + (halfN - halfF) * fr,
+      });
+      const a = seg(0.42);
+      const b = seg(0.58);
+      g.globalAlpha = alpha * 0.85;
+      g.fillStyle = 'rgba(5, 9, 26, 0.75)';
+      g.beginPath();
+      g.moveTo(a.cx - a.half, a.y);
+      g.lineTo(a.cx + a.half, a.y);
+      g.lineTo(b.cx + b.half, b.y);
+      g.lineTo(b.cx - b.half, b.y);
       g.closePath();
       g.fill();
     }
@@ -898,7 +1322,6 @@ export class Engine {
     hue: number
   ): void {
     const { w, h, dpr } = this;
-    const pad = 14 * dpr;
 
     // Progress bar
     g.fillStyle = 'rgba(255,255,255,0.12)';
@@ -906,11 +1329,29 @@ export class Engine {
     g.fillStyle = `hsl(${hue}, 100%, 65%)`;
     g.fillRect(0, 0, w * prog, 3 * dpr);
 
-    // Score
-    g.textAlign = 'left';
-    g.fillStyle = '#ffffff';
-    g.font = `800 ${Math.round(20 * dpr)}px system-ui, sans-serif`;
-    g.fillText(Math.round(this.shownScore).toLocaleString(), pad, pad + 20 * dpr);
+    // Big bouncy score, centered at the top.
+    const bump = Math.max(0, 1 - (now - this.lastScoreAt) / 260);
+    const pop = 1 + bump * bump * 0.28;
+    const wobble = Math.sin(now / 320) * 0.035;
+    const scoreStr = Math.round(this.shownScore).toLocaleString();
+    g.save();
+    g.translate(w / 2, 46 * dpr);
+    g.rotate(wobble);
+    g.scale(pop, pop);
+    g.textAlign = 'center';
+    g.font = `900 ${Math.round(36 * dpr)}px ${COMIC_FONT}`;
+    g.lineJoin = 'round';
+    g.lineWidth = 7 * dpr;
+    g.strokeStyle = 'rgba(8, 5, 28, 0.9)';
+    g.strokeText(scoreStr, 0, 0);
+    const sg = g.createLinearGradient(0, -26 * dpr, 0, 12 * dpr);
+    sg.addColorStop(0, '#ffffff');
+    sg.addColorStop(0.55, `hsl(${hue}, 100%, 72%)`);
+    sg.addColorStop(1, `hsl(${hue + 45}, 100%, 62%)`);
+    g.fillStyle = sg;
+    g.fillText(scoreStr, 0, 0);
+    g.restore();
+
     const judgedCount =
       this.counts.perfect + this.counts.great + this.counts.good + this.counts.miss;
     if (judgedCount > 0) {
@@ -918,10 +1359,56 @@ export class Engine {
         ((this.counts.perfect * 100 + this.counts.great * 60 + this.counts.good * 30) /
           (judgedCount * 100)) *
         100;
+      g.textAlign = 'center';
       g.fillStyle = 'rgba(255,255,255,0.55)';
-      g.font = `600 ${Math.round(11 * dpr)}px system-ui, sans-serif`;
-      g.fillText(`${acc.toFixed(1)}%`, pad, pad + 36 * dpr);
+      g.font = `700 ${Math.round(11 * dpr)}px system-ui, sans-serif`;
+      g.fillText(`${acc.toFixed(1)}%`, w / 2, 64 * dpr);
     }
+
+    // Milestone flash: a quick colored glow around the screen edges.
+    const flashAge = (now - this.lastMilestoneAt) / 600;
+    if (flashAge < 1) {
+      g.save();
+      g.globalCompositeOperation = 'lighter';
+      const fl = g.createRadialGradient(w / 2, h / 2, h * 0.35, w / 2, h / 2, h * 0.75);
+      fl.addColorStop(0, 'hsla(0,0%,0%,0)');
+      fl.addColorStop(1, `hsla(${hue}, 100%, 65%, ${0.35 * (1 - flashAge)})`);
+      g.fillStyle = fl;
+      g.fillRect(0, 0, w, h);
+      g.restore();
+    }
+
+    // Combo milestone popups: big comic word + combo count, easing in with
+    // overshoot, fading out — placed above the road so tiles stay visible.
+    g.save();
+    g.textAlign = 'center';
+    for (const p of this.popups) {
+      const age = (now - p.born) / 1300;
+      if (age >= 1) continue;
+      const scaleIn = easeOutBack(Math.min(1, age * 4));
+      const alpha = age < 0.65 ? 1 : 1 - (age - 0.65) / 0.35;
+      g.save();
+      g.translate(w / 2, h * 0.4);
+      g.rotate(-0.04 + Math.sin(now / 130) * 0.015);
+      g.scale(scaleIn, scaleIn);
+      g.globalAlpha = alpha;
+      g.font = `900 ${Math.round(15 * dpr)}px ${COMIC_FONT}`;
+      g.fillStyle = 'rgba(255,255,255,0.75)';
+      g.fillText(p.sub, 0, -30 * dpr);
+      g.font = `900 ${Math.round(38 * dpr)}px ${COMIC_FONT}`;
+      g.lineJoin = 'round';
+      g.lineWidth = 8 * dpr;
+      g.strokeStyle = 'rgba(8, 5, 28, 0.92)';
+      g.strokeText(p.title, 0, 0);
+      const pg = g.createLinearGradient(0, -30 * dpr, 0, 10 * dpr);
+      pg.addColorStop(0, '#fff7ae');
+      pg.addColorStop(0.5, `hsl(${(hue + 140) % 360}, 100%, 68%)`);
+      pg.addColorStop(1, `hsl(${hue}, 100%, 60%)`);
+      g.fillStyle = pg;
+      g.fillText(p.title, 0, 0);
+      g.restore();
+    }
+    g.restore();
 
     // Pause button: visible pill, top-right
     const pw = 48 * dpr;
@@ -955,11 +1442,11 @@ export class Engine {
       g.textAlign = 'center';
       g.globalAlpha = 0.92;
       g.fillStyle = `hsl(${hue - 20}, 100%, 78%)`;
-      g.font = `900 ${Math.round(34 * dpr * pop)}px system-ui, sans-serif`;
-      g.fillText(String(this.combo), w / 2, h * 0.32);
+      g.font = `900 ${Math.round(30 * dpr * pop)}px ${COMIC_FONT}`;
+      g.fillText(String(this.combo), w / 2, h * 0.3);
       g.globalAlpha = 0.6;
       g.font = `700 ${Math.round(11 * dpr)}px system-ui, sans-serif`;
-      g.fillText('COMBO', w / 2, h * 0.32 + 16 * dpr);
+      g.fillText('COMBO', w / 2, h * 0.3 + 16 * dpr);
       g.restore();
     }
 
@@ -989,6 +1476,13 @@ export class Engine {
       g.restore();
     }
   }
+}
+
+function keyLane(k: string): number {
+  if (k === 'a' || k === 'j' || k === 'arrowleft' || k === '1') return 0;
+  if (k === 's' || k === 'k' || k === 'arrowdown' || k === '2') return 1;
+  if (k === 'd' || k === 'l' || k === 'arrowright' || k === '3') return 2;
+  return -1;
 }
 
 // Local tiny PRNG for scenery (decoupled from chart generation).

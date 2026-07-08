@@ -205,7 +205,7 @@ export async function analyzeAudio(
   }
 
   // --- difficulty-ramped note selection --------------------------------------
-  const notes = buildNotes(onsets, duration, bpm);
+  const notes = buildNotes(onsets, duration, bpm, envelope, ENVELOPE_RATE);
 
   return { notes, bpm, duration, envelope, envelopeRate: ENVELOPE_RATE };
 }
@@ -236,7 +236,13 @@ function estimateBpm(flux: Float32Array, frameDt: number): number {
   return Math.round(bpm * 10) / 10;
 }
 
-function buildNotes(onsets: Onset[], duration: number, bpm: number): Note[] {
+function buildNotes(
+  onsets: Onset[],
+  duration: number,
+  bpm: number,
+  envelope: Float32Array,
+  envelopeRate: number
+): Note[] {
   const rng = mulberry32(Math.round(duration * 1000) ^ (onsets.length << 8));
 
   // Fallback for songs where onset detection finds almost nothing: lay tiles
@@ -250,6 +256,21 @@ function buildNotes(onsets: Onset[], duration: number, bpm: number): Note[] {
     onsets = grid;
   }
 
+  const envAt = (t: number) => {
+    const idx = Math.floor(t * envelopeRate);
+    return idx >= 0 && idx < envelope.length ? envelope[idx] : 0;
+  };
+  /** Mean loudness over [a, b] — used to confirm a sustained sound. */
+  const envMean = (a: number, b: number) => {
+    let sum = 0;
+    let n = 0;
+    for (let t = a; t < b; t += 1 / envelopeRate) {
+      sum += envAt(t);
+      n++;
+    }
+    return n > 0 ? sum / n : 0;
+  };
+
   // Percentile thresholds on onset strength: early game keeps only the
   // strongest hits, late game keeps nearly everything.
   const sorted = onsets.map((o) => o.strength).sort((a, b) => a - b);
@@ -260,8 +281,25 @@ function buildNotes(onsets: Onset[], duration: number, bpm: number): Note[] {
   let lastT = -10;
   let lastLane = -1;
   let laneStreak = 0;
+  let lastBonusT = -10;
 
-  for (const o of onsets) {
+  const pickLane = (o: Onset, gapFromLast: number): number => {
+    let lane = o.band;
+    if (lane === lastLane) {
+      laneStreak++;
+      // Break up long same-lane streams and impossible fast jacks.
+      if (laneStreak >= 3 || gapFromLast < 0.22) {
+        lane = (lane + (rng() < 0.5 ? 1 : 2)) % 3;
+        laneStreak = 0;
+      }
+    } else {
+      laneStreak = 0;
+    }
+    return lane;
+  };
+
+  for (let i = 0; i < onsets.length; i++) {
+    const o = onsets[i];
     if (o.t < 1.2 || o.t > duration - 0.5) continue;
     const p = Math.min(1, o.t / duration);
     const ramp = easeInOut(p);
@@ -272,22 +310,99 @@ function buildNotes(onsets: Onset[], duration: number, bpm: number): Note[] {
     const cut = quantile(0.55 * (1 - ramp)); // top 45% early → everything late
     if (o.strength < cut) continue;
 
-    // Lane from band dominance, with playability fixes.
-    let lane = o.band;
-    if (lane === lastLane) {
-      laneStreak++;
-      // Break up long same-lane streams and impossible fast jacks.
-      if (laneStreak >= 3 || o.t - lastT < 0.22) {
-        lane = (lane + (rng() < 0.5 ? 1 : 2)) % 3;
-        laneStreak = 0;
+    const next = onsets[i + 1];
+    const gapToNext = next ? next.t - o.t : Infinity;
+
+    // --- Stream: a run of rapid onsets (fills, rolls) becomes a burst of
+    // alternating tiles riding the actual hits. Late-game only.
+    if (p > 0.5 && gapToNext <= 0.24 && rng() < 0.12 + 0.3 * ramp) {
+      let run = 1;
+      while (
+        i + run < onsets.length &&
+        onsets[i + run].t - onsets[i + run - 1].t <= 0.24 &&
+        run < 4 + Math.floor(ramp * 4)
+      ) {
+        run++;
       }
-    } else {
-      laneStreak = 0;
+      if (run >= 4) {
+        let lane = pickLane(o, o.t - lastT);
+        const dir = rng() < 0.5 ? 1 : 2;
+        for (let k = 0; k < run; k++) {
+          const on = onsets[i + k];
+          if (on.t > duration - 0.5) break;
+          notes.push({ t: on.t, lane });
+          lane = (lane + dir) % 3;
+        }
+        lastT = onsets[i + run - 1].t;
+        lastLane = -1;
+        laneStreak = 0;
+        i += run - 1;
+        continue;
+      }
     }
 
+    // --- Double-tap: the music really has two quick hits (a flam / echo
+    // pair) — one tile that wants two taps. From 30% progress.
+    if (
+      p > 0.3 &&
+      next &&
+      gapToNext > 0.11 &&
+      gapToNext < 0.3 &&
+      o.strength >= quantile(0.45) &&
+      next.strength >= quantile(0.35) &&
+      o.t - lastT >= minGap * 1.25 &&
+      rng() < 0.25 + 0.35 * ramp
+    ) {
+      const lane = pickLane(o, o.t - lastT);
+      notes.push({ t: o.t, lane, kind: 'double' });
+      lastT = next.t;
+      lastLane = lane;
+      i++; // the second hit is consumed by this tile
+      continue;
+    }
+
+    // --- Hold: a notable hit at the start of a sustained loud stretch —
+    // press and ride it while the music carries (onsets underneath are
+    // consumed by the hold). From 15% progress, as an occasional flourish.
+    if (
+      p > 0.15 &&
+      o.strength >= quantile(0.55) &&
+      o.t - lastT >= minGap * 1.5 &&
+      envMean(o.t + 0.1, o.t + 0.9) > 0.4 &&
+      rng() < 0.14 + 0.22 * ramp
+    ) {
+      // Extend the tail while the loudness keeps up (max 2.4 s).
+      let dur = 0.7;
+      while (dur < 2.4 && envAt(o.t + dur + 0.15) > 0.35) dur += 0.1;
+      dur = Math.min(dur, duration - 0.4 - o.t);
+      if (dur >= 0.6) {
+        const lane = pickLane(o, o.t - lastT);
+        notes.push({ t: o.t, lane, kind: 'hold', dur });
+        lastT = o.t + dur + 0.1; // onsets during the hold are skipped
+        lastLane = lane;
+        continue;
+      }
+    }
+
+    // --- Bonus gem: a rare, extra-shiny tile on an accented hit, worth big
+    // points. At most one every ~8 seconds.
+    const lane = pickLane(o, o.t - lastT);
+    if (
+      o.strength >= quantile(0.8) &&
+      o.t - lastBonusT >= 8 &&
+      o.t - lastT >= minGap * 1.4 &&
+      rng() < 0.35
+    ) {
+      notes.push({ t: o.t, lane, kind: 'bonus' });
+      lastBonusT = o.t;
+      lastT = o.t;
+      lastLane = lane;
+      continue;
+    }
+
+    // --- Plain tap (+ chord on strong, well-spaced hits after 30%).
     notes.push({ t: o.t, lane });
 
-    // Chords appear after 30% song progress on strong, well-spaced hits.
     const chordChance = p > 0.3 ? ((p - 0.3) / 0.7) * 0.4 : 0;
     if (
       chordChance > 0 &&
