@@ -7,6 +7,7 @@ import { uploadPresigned } from '@vercel/blob/client';
 import type { SongMeta } from '@/lib/types';
 import { DEMO_SONG } from '@/lib/demo-song';
 import { decodeAudio } from '@/lib/aiff';
+import { getAllBest, type BestEntry } from '@/lib/scores';
 
 const MAX_BYTES = 50 * 1024 * 1024;
 
@@ -137,6 +138,8 @@ export default function LibraryPage() {
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState<PendingUpload | null>(null);
   const [showUpload, setShowUpload] = useState(false);
+  const [best, setBest] = useState<Record<string, BestEntry>>({});
+  const [sortBy, setSortBy] = useState<'newest' | 'played'>('newest');
   const fileInput = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
@@ -153,7 +156,20 @@ export default function LibraryPage() {
 
   useEffect(() => {
     void refresh();
+    setBest(getAllBest());
   }, [refresh]);
+
+  const totalScore = Object.values(best).reduce((sum, e) => sum + (e.score || 0), 0);
+
+  const sortedSongs =
+    songs === null
+      ? null
+      : [...songs].sort((a, b) =>
+          sortBy === 'played'
+            ? (b.plays ?? 0) - (a.plays ?? 0) ||
+              b.createdAt.localeCompare(a.createdAt)
+            : b.createdAt.localeCompare(a.createdAt)
+        );
 
   const doUpload = useCallback(
     async (file: File, ext: string, title: string, artist: string) => {
@@ -318,28 +334,51 @@ export default function LibraryPage() {
       <p className="tagline">
         Pick a song and tap to the beat — tiles fall in sync with the music.
       </p>
+      {totalScore > 0 && (
+        <p className="total-score">🏆 Total score: {totalScore.toLocaleString()}</p>
+      )}
 
       <div className="library-head">
         <div className="section-title">Song library</div>
-        {(songs?.length ?? 0) > 0 && (
-          <button className="random-btn" onClick={playRandom}>
-            🎲 Random
-          </button>
-        )}
+        <div className="library-controls">
+          {(songs?.length ?? 0) > 1 && (
+            <div className="sort-toggle" role="group" aria-label="Sort songs">
+              <button
+                className={sortBy === 'newest' ? 'active' : ''}
+                onClick={() => setSortBy('newest')}
+              >
+                Newest
+              </button>
+              <button
+                className={sortBy === 'played' ? 'active' : ''}
+                onClick={() => setSortBy('played')}
+              >
+                Most played
+              </button>
+            </div>
+          )}
+          {(songs?.length ?? 0) > 0 && (
+            <button className="random-btn" onClick={playRandom}>
+              🎲 Random
+            </button>
+          )}
+        </div>
       </div>
       <div className="song-list">
-        {songs === null && <div className="empty-note">Loading songs…</div>}
-        {songs?.map((s) => (
+        {sortedSongs === null && <div className="empty-note">Loading songs…</div>}
+        {sortedSongs?.map((s) => (
           <SongCard
             key={s.id}
             title={s.title}
             sub={[
               s.artist,
               formatDuration(s.duration),
-              new Date(s.createdAt).toLocaleDateString(),
+              (s.plays ?? 0) > 0 &&
+                `${s.plays} play${s.plays === 1 ? '' : 's'}`,
             ]
               .filter(Boolean)
               .join(' · ')}
+            best={best[s.id]?.score}
             href={`/play/${s.id}`}
             icon="🎧"
           />
@@ -484,11 +523,13 @@ function SongCard({
   sub,
   href,
   icon,
+  best,
 }: {
   title: string;
   sub: string;
   href: string;
   icon: string;
+  best?: number;
 }) {
   const hue = hashHue(title);
   return (
@@ -504,6 +545,9 @@ function SongCard({
       <div className="song-info">
         <div className="song-title">{title}</div>
         <div className="song-sub">{sub}</div>
+        {best !== undefined && (
+          <div className="song-best">★ Best {best.toLocaleString()}</div>
+        )}
       </div>
       <div className="play-btn">▶</div>
     </Link>

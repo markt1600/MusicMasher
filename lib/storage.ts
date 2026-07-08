@@ -152,6 +152,39 @@ export async function saveLocalSong(
   return full;
 }
 
+/** Persist an updated meta record (blob or local). */
+async function writeMeta(meta: SongMeta): Promise<void> {
+  if (storageMode() === 'blob') {
+    await registerBlobSong(meta);
+  } else {
+    await fs.writeFile(
+      path.join(LOCAL_DIR, `${meta.id}.json`),
+      JSON.stringify(meta, null, 2)
+    );
+  }
+}
+
+/** Bump the shared play counter. Best-effort — races just drop a count. */
+export async function incrementPlays(id: string): Promise<void> {
+  const meta = await getSong(id);
+  if (!meta) return;
+  meta.plays = (meta.plays ?? 0) + 1;
+  await writeMeta(meta);
+}
+
+/** Update editable song fields (admin). Returns the new meta or null. */
+export async function updateSongMeta(
+  id: string,
+  fields: { title?: string; artist?: string }
+): Promise<SongMeta | null> {
+  const meta = await getSong(id);
+  if (!meta) return null;
+  if (fields.title !== undefined) meta.title = sanitizeTitle(fields.title);
+  if (fields.artist !== undefined) meta.artist = sanitizeTitle(fields.artist, '');
+  await writeMeta(meta);
+  return meta;
+}
+
 /** Remove a song (audio + metadata) from storage. Returns false if absent. */
 export async function deleteSong(id: string): Promise<boolean> {
   if (!isValidSongId(id)) return false;

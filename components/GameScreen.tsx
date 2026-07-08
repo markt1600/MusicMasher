@@ -6,6 +6,7 @@ import { analyzeAudio } from '@/lib/analyze';
 import { decodeAudio } from '@/lib/aiff';
 import { DEMO_SONG, getDemoSong } from '@/lib/demo-song';
 import { Engine } from '@/lib/game/engine';
+import { getBest, submitScore, type BestEntry } from '@/lib/scores';
 import type { Beatmap, GameStats } from '@/lib/types';
 
 type Phase = 'loading' | 'ready' | 'playing' | 'paused' | 'results' | 'error';
@@ -15,15 +16,21 @@ const OFFSET_KEY = 'mm-offset-ms';
 // The demo chart never changes — analyze it once per page session.
 let demoMapCache: Beatmap | null = null;
 
+function accuracy(stats: GameStats): number {
+  if (stats.totalNotes === 0) return 100;
+  return (
+    ((stats.perfect * 100 + stats.great * 60 + stats.good * 30) /
+      (stats.totalNotes * 100)) *
+    100
+  );
+}
+
 function grade(stats: GameStats): string {
-  if (stats.totalNotes === 0) return 'S';
-  const acc =
-    (stats.perfect * 100 + stats.great * 60 + stats.good * 30) /
-    (stats.totalNotes * 100);
-  if (acc >= 0.95) return 'S';
-  if (acc >= 0.88) return 'A';
-  if (acc >= 0.78) return 'B';
-  if (acc >= 0.65) return 'C';
+  const acc = accuracy(stats);
+  if (acc >= 95) return 'S';
+  if (acc >= 88) return 'A';
+  if (acc >= 78) return 'B';
+  if (acc >= 65) return 'C';
   return 'D';
 }
 
@@ -42,6 +49,11 @@ export default function GameScreen({ songId }: { songId: string }) {
   const [errorMsg, setErrorMsg] = useState('');
   const [stats, setStats] = useState<GameStats | null>(null);
   const [offsetMs, setOffsetMs] = useState(0);
+  const [bestResult, setBestResult] = useState<{
+    newBest: boolean;
+    prev: BestEntry | null;
+  } | null>(null);
+  const playCounted = useRef(false);
 
   // ---------------------------------------------------------------------
   // Load: fetch (or synthesize) audio → decode → analyze beats
@@ -106,6 +118,14 @@ export default function GameScreen({ songId }: { songId: string }) {
           throw new Error("Couldn't find a beat in this song.");
         }
         if (songId === 'demo') demoMapCache = map;
+        console.log(
+          '[MusicMasher] chart:',
+          `${map.notes.length} notes,`,
+          `${map.notes.filter((n) => n.kind === 'double').length} doubles,`,
+          `${map.notes.filter((n) => n.kind === 'hold').length} holds,`,
+          `${map.notes.filter((n) => n.kind === 'bonus').length} gems,`,
+          `${Math.round(map.bpm)} bpm`
+        );
 
         bufferRef.current = buffer;
         beatmapRef.current = map;
@@ -155,6 +175,14 @@ export default function GameScreen({ songId }: { songId: string }) {
     const engine = new Engine(canvas, audioCtx, buffer, map, title, {
       onEnd: (s) => {
         setStats(s);
+        setBestResult(
+          submitScore(songId, {
+            score: s.score,
+            acc: accuracy(s),
+            maxCombo: s.maxCombo,
+            grade: grade(s),
+          })
+        );
         setPhase('results');
         engineRef.current?.destroy();
         engineRef.current = null;
@@ -165,7 +193,13 @@ export default function GameScreen({ songId }: { songId: string }) {
     engineRef.current = engine;
     engine.start();
     setPhase('playing');
-  }, [title]);
+
+    // Count one play per visit (restarts don't inflate the counter).
+    if (!playCounted.current && songId !== 'demo') {
+      playCounted.current = true;
+      void fetch(`/api/songs/${songId}/play`, { method: 'POST' }).catch(() => {});
+    }
+  }, [songId, title]);
 
   const resumeGame = useCallback(() => {
     engineRef.current?.resume();
@@ -186,12 +220,7 @@ export default function GameScreen({ songId }: { songId: string }) {
   // ---------------------------------------------------------------------
   // Render
   // ---------------------------------------------------------------------
-  const acc =
-    stats && stats.totalNotes > 0
-      ? ((stats.perfect * 100 + stats.great * 60 + stats.good * 30) /
-          (stats.totalNotes * 100)) *
-        100
-      : 100;
+  const acc = stats ? accuracy(stats) : 100;
 
   return (
     <div className="game-root">
@@ -278,8 +307,14 @@ export default function GameScreen({ songId }: { songId: string }) {
 
       {phase === 'results' && stats && (
         <div className="overlay">
+          {bestResult?.newBest && <div className="new-best">🏆 NEW BEST!</div>}
           <div className="grade">{grade(stats)}</div>
           <div className="result-score">{stats.score.toLocaleString()}</div>
+          {!bestResult?.newBest && (
+            <p className="subtle best-line">
+              Your best: {(bestResult?.prev ?? getBest(songId))?.score.toLocaleString() ?? '—'}
+            </p>
+          )}
           <p className="subtle">
             {title} · accuracy {acc.toFixed(1)}% · best combo {stats.maxCombo}
             {stats.miss === 0 && stats.totalNotes > 0 ? ' · FULL COMBO! 🔥' : ''}

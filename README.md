@@ -28,6 +28,14 @@ Built for mobile touch screens first, with full desktop keyboard support.
   with generous spacing; as the song progresses the density threshold drops,
   minimum spacing shrinks (0.42 s → 0.16 s), scroll speed increases, and
   chords appear.
+- **Tile variety, driven by the music** — quick double-hits in the audio
+  become split **double-tap** tiles; sustained loud stretches become **hold**
+  tiles you ride; rapid fills become alternating **streams**; accented hits
+  occasionally spawn a spinning iridescent **bonus gem** worth extra points.
+  All of it ramps up with song progress.
+- **Scores** — per-song personal bests and a cumulative total score are kept
+  on your device; shared play counts power a "Most played" sort in the
+  library. Combo milestones celebrate on screen as you stack them.
 - **Rendering** — a single 2D canvas with a hand-rolled perspective
   projection: a three-lane road converging on a horizon vanishing point,
   glowing tiles, hit rings, particles, a sun that pulses with the song's
@@ -72,7 +80,8 @@ piece of setup.
 
 ## Admin
 
-`/admin` (also linked from the library footer) lets you delete uploaded songs.
+`/admin` (also linked from the library footer) lets you edit song titles and
+artists, and delete uploaded songs.
 The default password is `yippy`; set the `ADMIN_PASSWORD` environment variable
 in Vercel to change it. Deletion removes both the audio and its metadata for
 everyone.

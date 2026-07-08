@@ -18,6 +18,9 @@ export default function AdminPage() {
   const [songs, setSongs] = useState<SongMeta[] | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editTitle, setEditTitle] = useState('');
+  const [editArtist, setEditArtist] = useState('');
 
   const loadSongs = useCallback(async () => {
     try {
@@ -95,6 +98,54 @@ export default function AdminPage() {
     [authedPw]
   );
 
+  const startEdit = useCallback((song: SongMeta) => {
+    setEditingId(song.id);
+    setEditTitle(song.title);
+    setEditArtist(song.artist ?? '');
+    setNotice(null);
+    setError(null);
+  }, []);
+
+  const saveEdit = useCallback(async () => {
+    if (!authedPw || !editingId) return;
+    if (!editTitle.trim()) {
+      setError('Title cannot be empty.');
+      return;
+    }
+    setBusyId(editingId);
+    setError(null);
+    try {
+      const res = await fetch(`/api/songs/${editingId}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-password': authedPw,
+        },
+        body: JSON.stringify({ title: editTitle, artist: editArtist }),
+      });
+      if (res.status === 401) {
+        sessionStorage.removeItem(PW_KEY);
+        setAuthedPw(null);
+        setError('Session expired — enter the password again.');
+        return;
+      }
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error ?? 'Update failed.');
+      }
+      const { song } = await res.json();
+      setSongs((prev) =>
+        prev?.map((s) => (s.id === song.id ? song : s)) ?? null
+      );
+      setEditingId(null);
+      setNotice(`Updated "${song.title}".`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Update failed.');
+    } finally {
+      setBusyId(null);
+    }
+  }, [authedPw, editArtist, editTitle, editingId]);
+
   const logout = useCallback(() => {
     sessionStorage.removeItem(PW_KEY);
     setAuthedPw(null);
@@ -147,30 +198,87 @@ export default function AdminPage() {
           {error && <div className="upload-status upload-error">{error}</div>}
           <div className="song-list">
             {songs === null && <div className="empty-note">Loading songs…</div>}
-            {songs?.map((s) => (
-              <div key={s.id} className="song-card admin-row">
-                <div className="song-info">
-                  <div className="song-title">{s.title}</div>
-                  <div className="song-sub">
-                    {[
-                      s.artist,
-                      formatSize(s.size),
-                      (s.ext ?? 'mp3').toUpperCase(),
-                      new Date(s.createdAt).toLocaleDateString(),
-                    ]
-                      .filter(Boolean)
-                      .join(' · ')}
+            {songs?.map((s) =>
+              editingId === s.id ? (
+                <div key={s.id} className="song-card admin-row admin-edit">
+                  <div className="song-info">
+                    <label className="field">
+                      <span>Track name</span>
+                      <input
+                        type="text"
+                        value={editTitle}
+                        maxLength={80}
+                        autoFocus
+                        onChange={(e) => setEditTitle(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void saveEdit();
+                          if (e.key === 'Escape') setEditingId(null);
+                        }}
+                      />
+                    </label>
+                    <label className="field">
+                      <span>Artist</span>
+                      <input
+                        type="text"
+                        value={editArtist}
+                        maxLength={80}
+                        onChange={(e) => setEditArtist(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') void saveEdit();
+                          if (e.key === 'Escape') setEditingId(null);
+                        }}
+                      />
+                    </label>
+                    <div className="admin-edit-actions">
+                      <button
+                        className="ghost-btn admin-logout"
+                        onClick={() => setEditingId(null)}
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        className="big-btn modal-cta"
+                        disabled={busyId === s.id}
+                        onClick={() => void saveEdit()}
+                      >
+                        {busyId === s.id ? 'Saving…' : 'Save'}
+                      </button>
+                    </div>
                   </div>
                 </div>
-                <button
-                  className="danger-btn"
-                  disabled={busyId === s.id}
-                  onClick={() => void remove(s)}
-                >
-                  {busyId === s.id ? 'Deleting…' : 'Delete'}
-                </button>
-              </div>
-            ))}
+              ) : (
+                <div key={s.id} className="song-card admin-row">
+                  <div className="song-info">
+                    <div className="song-title">{s.title}</div>
+                    <div className="song-sub">
+                      {[
+                        s.artist,
+                        formatSize(s.size),
+                        (s.ext ?? 'mp3').toUpperCase(),
+                        `${s.plays ?? 0} plays`,
+                        new Date(s.createdAt).toLocaleDateString(),
+                      ]
+                        .filter(Boolean)
+                        .join(' · ')}
+                    </div>
+                  </div>
+                  <button
+                    className="edit-btn"
+                    disabled={busyId !== null}
+                    onClick={() => startEdit(s)}
+                  >
+                    Edit
+                  </button>
+                  <button
+                    className="danger-btn"
+                    disabled={busyId !== null}
+                    onClick={() => void remove(s)}
+                  >
+                    {busyId === s.id ? 'Deleting…' : 'Delete'}
+                  </button>
+                </div>
+              )
+            )}
             {songs?.length === 0 && (
               <div className="empty-note">No uploaded songs.</div>
             )}
