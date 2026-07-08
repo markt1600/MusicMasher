@@ -140,6 +140,12 @@ export default function LibraryPage() {
   const [showUpload, setShowUpload] = useState(false);
   const [best, setBest] = useState<Record<string, BestEntry>>({});
   const [sortBy, setSortBy] = useState<'newest' | 'played'>('newest');
+  const [worldBests, setWorldBests] = useState<
+    Record<string, { name: string; score: number }>
+  >({});
+  const [leaderboard, setLeaderboard] = useState<
+    { name: string; total: number; songs: number }[]
+  >([]);
   const fileInput = useRef<HTMLInputElement>(null);
 
   const refresh = useCallback(async () => {
@@ -151,6 +157,14 @@ export default function LibraryPage() {
       setUploadsEnabled(data.uploads !== false);
     } catch {
       setSongs([]);
+    }
+    try {
+      const res = await fetch('/api/scores', { cache: 'no-store' });
+      const data = await res.json();
+      setWorldBests(data.songs ?? {});
+      setLeaderboard(data.leaderboard ?? []);
+    } catch {
+      // scoreboard unavailable — non-fatal
     }
   }, []);
 
@@ -379,6 +393,7 @@ export default function LibraryPage() {
               .filter(Boolean)
               .join(' · ')}
             best={best[s.id]?.score}
+            world={worldBests[s.id]}
             href={`/play/${s.id}`}
             icon="🎧"
           />
@@ -397,6 +412,28 @@ export default function LibraryPage() {
           </>
         )}
       </div>
+
+      {leaderboard.length > 0 && (
+        <>
+          <div className="library-head leaderboard-head">
+            <div className="section-title">Top players</div>
+          </div>
+          <div className="leaderboard">
+            {leaderboard.map((p, i) => (
+              <div key={p.name} className="leaderboard-row">
+                <span className="lb-rank">
+                  {i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`}
+                </span>
+                <span className="lb-name">{p.name}</span>
+                <span className="lb-songs">
+                  {p.songs} song{p.songs === 1 ? '' : 's'}
+                </span>
+                <span className="lb-total">{p.total.toLocaleString()}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
 
       {!showUpload && (
         <button className="upload-link" onClick={() => setShowUpload(true)}>
@@ -524,12 +561,14 @@ function SongCard({
   href,
   icon,
   best,
+  world,
 }: {
   title: string;
   sub: string;
   href: string;
   icon: string;
   best?: number;
+  world?: { name: string; score: number };
 }) {
   const hue = hashHue(title);
   return (
@@ -545,8 +584,16 @@ function SongCard({
       <div className="song-info">
         <div className="song-title">{title}</div>
         <div className="song-sub">{sub}</div>
-        {best !== undefined && (
-          <div className="song-best">★ Best {best.toLocaleString()}</div>
+        {(best !== undefined || world) && (
+          <div className="song-best">
+            {best !== undefined && <>★ Best {best.toLocaleString()}</>}
+            {best !== undefined && world && ' · '}
+            {world && (
+              <span className="song-world">
+                👑 {world.score.toLocaleString()} {world.name}
+              </span>
+            )}
+          </div>
         )}
       </div>
       <div className="play-btn">▶</div>

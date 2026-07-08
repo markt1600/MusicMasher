@@ -48,3 +48,23 @@ export function submitScore(
 export function totalScore(): number {
   return Object.values(readAll()).reduce((sum, e) => sum + (e.score || 0), 0);
 }
+
+// --- player identity for the shared scoreboards ----------------------------
+
+const NAME_KEY = 'mm-player-name';
+
+export function getPlayerName(): string {
+  try {
+    return localStorage.getItem(NAME_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+export function setPlayerName(name: string): void {
+  try {
+    localStorage.setItem(NAME_KEY, name.slice(0, 16).trim());
+  } catch {
+    // blocked storage — non-fatal
+  }
+}

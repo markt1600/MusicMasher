@@ -152,6 +152,135 @@ export async function saveLocalSong(
   return full;
 }
 
+// ---------------------------------------------------------------------------
+// Global scoreboards — one JSON document per song holding each player's best
+// ---------------------------------------------------------------------------
+
+export interface ScoreEntry {
+  score: number;
+  acc: number;
+  maxCombo: number;
+  grade: string;
+  updatedAt: string;
+}
+
+export interface SongScores {
+  players: Record<string, ScoreEntry>;
+}
+
+const SCORES_DIR = path.join(process.cwd(), '.data', 'scores');
+const MAX_PLAYERS_PER_SONG = 200;
+
+/** The demo track has scores too, even though it has no uploaded meta. */
+export function isValidScoreSongId(id: string): boolean {
+  return id === 'demo' || isValidSongId(id);
+}
+
+export async function getSongScores(songId: string): Promise<SongScores> {
+  if (!isValidScoreSongId(songId)) return { players: {} };
+  if (storageMode() === 'blob') {
+    const res = await list({ prefix: `scores/${songId}.json`, limit: 5 });
+    const blob = res.blobs.find((b) => b.pathname === `scores/${songId}.json`);
+    if (!blob) return { players: {} };
+    try {
+      const r = await fetch(blob.url, { cache: 'no-store' });
+      if (!r.ok) return { players: {} };
+      return (await r.json()) as SongScores;
+    } catch {
+      return { players: {} };
+    }
+  }
+  try {
+    const raw = await fs.readFile(path.join(SCORES_DIR, `${songId}.json`), 'utf8');
+    return JSON.parse(raw) as SongScores;
+  } catch {
+    return { players: {} };
+  }
+}
+
+async function writeSongScores(songId: string, scores: SongScores): Promise<void> {
+  // Bound the document: keep only the top N players by score.
+  const entries = Object.entries(scores.players)
+    .sort((a, b) => b[1].score - a[1].score)
+    .slice(0, MAX_PLAYERS_PER_SONG);
+  const bounded: SongScores = { players: Object.fromEntries(entries) };
+  if (storageMode() === 'blob') {
+    await put(`scores/${songId}.json`, JSON.stringify(bounded), {
+      access: 'public',
+      contentType: 'application/json',
+      addRandomSuffix: false,
+      allowOverwrite: true,
+    });
+  } else {
+    await fs.mkdir(SCORES_DIR, { recursive: true });
+    await fs.writeFile(
+      path.join(SCORES_DIR, `${songId}.json`),
+      JSON.stringify(bounded, null, 2)
+    );
+  }
+}
+
+/** Record a player's result if it beats their previous best for the song. */
+export async function submitGlobalScore(
+  songId: string,
+  name: string,
+  entry: ScoreEntry
+): Promise<{ updated: boolean; scores: SongScores }> {
+  const scores = await getSongScores(songId);
+  const prev = scores.players[name];
+  if (prev && prev.score >= entry.score) {
+    return { updated: false, scores };
+  }
+  scores.players[name] = entry;
+  await writeSongScores(songId, scores);
+  return { updated: true, scores };
+}
+
+/** All scoreboards, keyed by song id. */
+export async function getAllScores(): Promise<Record<string, SongScores>> {
+  const result: Record<string, SongScores> = {};
+  if (storageMode() === 'blob') {
+    let cursor: string | undefined;
+    do {
+      const res = await list({ prefix: 'scores/', cursor, limit: 1000 });
+      cursor = res.cursor;
+      const fetched = await Promise.all(
+        res.blobs
+          .filter((b) => b.pathname.endsWith('.json'))
+          .map(async (b) => {
+            const songId = b.pathname.slice('scores/'.length, -'.json'.length);
+            try {
+              const r = await fetch(b.url, { cache: 'no-store' });
+              if (!r.ok) return null;
+              return [songId, (await r.json()) as SongScores] as const;
+            } catch {
+              return null;
+            }
+          })
+      );
+      for (const item of fetched) {
+        if (item) result[item[0]] = item[1];
+      }
+    } while (cursor);
+    return result;
+  }
+  try {
+    const files = await fs.readdir(SCORES_DIR);
+    for (const f of files) {
+      if (!f.endsWith('.json')) continue;
+      try {
+        const raw = await fs.readFile(path.join(SCORES_DIR, f), 'utf8');
+        result[f.slice(0, -'.json'.length)] = JSON.parse(raw) as SongScores;
+      } catch {
+        // skip corrupt file
+      }
+    }
+  } catch {
+    // no scores yet
+  }
+  return result;
+}
+
 /** Persist an updated meta record (blob or local). */
 async function writeMeta(meta: SongMeta): Promise<void> {
   if (storageMode() === 'blob') {

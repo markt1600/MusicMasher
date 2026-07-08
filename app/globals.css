@@ -402,6 +402,34 @@ button {
   margin-top: -6px;
 }
 
+.world-record {
+  color: #7dfff2;
+  text-shadow: 0 0 26px rgba(125, 255, 242, 0.65);
+}
+
+.name-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.name-form input {
+  padding: 11px 13px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+  outline: none;
+  width: 170px;
+  text-align: center;
+}
+
+.name-form input:focus {
+  border-color: var(--neon);
+}
+
 .result-stats {
   display: grid;
   grid-template-columns: repeat(4, minmax(64px, 1fr));
@@ -497,6 +525,60 @@ button {
   font-size: 11.5px;
   font-weight: 700;
   color: #ffd76e;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.song-world {
+  color: #b9a4ff;
+}
+
+.leaderboard-head {
+  margin-top: 26px;
+}
+
+.leaderboard {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.leaderboard-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  font-size: 13px;
+}
+
+.lb-rank {
+  width: 26px;
+  text-align: center;
+  font-weight: 800;
+  color: var(--muted);
+}
+
+.lb-name {
+  flex: 1;
+  font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.lb-songs {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.lb-total {
+  font-weight: 800;
+  color: #ffd76e;
+  font-variant-numeric: tabular-nums;
 }
 
 .upload-link {

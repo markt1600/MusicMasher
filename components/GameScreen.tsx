@@ -6,7 +6,13 @@ import { analyzeAudio } from '@/lib/analyze';
 import { decodeAudio } from '@/lib/aiff';
 import { DEMO_SONG, getDemoSong } from '@/lib/demo-song';
 import { Engine } from '@/lib/game/engine';
-import { getBest, submitScore, type BestEntry } from '@/lib/scores';
+import {
+  getBest,
+  submitScore,
+  getPlayerName,
+  setPlayerName,
+  type BestEntry,
+} from '@/lib/scores';
 import type { Beatmap, GameStats } from '@/lib/types';
 
 type Phase = 'loading' | 'ready' | 'playing' | 'paused' | 'results' | 'error';
@@ -55,6 +61,13 @@ export default function GameScreen({ songId }: { songId: string }) {
   } | null>(null);
   const playCounted = useRef(false);
 
+  // shared scoreboard state
+  const [player, setPlayer] = useState('');
+  const [nameDraft, setNameDraft] = useState('');
+  const [globalBest, setGlobalBest] = useState<{ name: string; score: number } | null>(null);
+  const [isRecord, setIsRecord] = useState(false);
+  const scorePosted = useRef(false);
+
   // ---------------------------------------------------------------------
   // Load: fetch (or synthesize) audio → decode → analyze beats
   // ---------------------------------------------------------------------
@@ -67,6 +80,7 @@ export default function GameScreen({ songId }: { songId: string }) {
 
     const saved = Number(localStorage.getItem(OFFSET_KEY) ?? 0);
     if (Number.isFinite(saved)) setOffsetMs(saved);
+    setPlayer(getPlayerName());
 
     (async () => {
       try {
@@ -170,6 +184,9 @@ export default function GameScreen({ songId }: { songId: string }) {
     if (!canvas || !audioCtx || !buffer || !map) return;
 
     engineRef.current?.destroy();
+    scorePosted.current = false;
+    setGlobalBest(null);
+    setIsRecord(false);
     await audioCtx.resume(); // requires the user gesture we're inside of
 
     const engine = new Engine(canvas, audioCtx, buffer, map, title, {
@@ -200,6 +217,50 @@ export default function GameScreen({ songId }: { songId: string }) {
       void fetch(`/api/songs/${songId}/play`, { method: 'POST' }).catch(() => {});
     }
   }, [songId, title]);
+
+  const postScore = useCallback(
+    async (name: string, s: GameStats) => {
+      if (scorePosted.current) return;
+      scorePosted.current = true;
+      try {
+        const res = await fetch('/api/scores', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            songId,
+            name,
+            score: s.score,
+            acc: accuracy(s),
+            maxCombo: s.maxCombo,
+            grade: grade(s),
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setGlobalBest(data.best ?? null);
+          setIsRecord(Boolean(data.isRecord));
+        }
+      } catch {
+        // offline — the local best is still recorded
+      }
+    },
+    [songId]
+  );
+
+  // Auto-post once the results screen shows, when we already know the player.
+  useEffect(() => {
+    if (phase === 'results' && stats && player && !scorePosted.current) {
+      void postScore(player, stats);
+    }
+  }, [phase, player, postScore, stats]);
+
+  const savePlayerName = useCallback(() => {
+    const name = nameDraft.trim().slice(0, 16);
+    if (!name || !stats) return;
+    setPlayerName(name);
+    setPlayer(name);
+    void postScore(name, stats);
+  }, [nameDraft, postScore, stats]);
 
   const resumeGame = useCallback(() => {
     engineRef.current?.resume();
@@ -307,13 +368,39 @@ export default function GameScreen({ songId }: { songId: string }) {
 
       {phase === 'results' && stats && (
         <div className="overlay">
-          {bestResult?.newBest && <div className="new-best">🏆 NEW BEST!</div>}
+          {isRecord ? (
+            <div className="new-best world-record">🌍 WORLD RECORD!</div>
+          ) : (
+            bestResult?.newBest && <div className="new-best">🏆 NEW BEST!</div>
+          )}
           <div className="grade">{grade(stats)}</div>
           <div className="result-score">{stats.score.toLocaleString()}</div>
           {!bestResult?.newBest && (
             <p className="subtle best-line">
               Your best: {(bestResult?.prev ?? getBest(songId))?.score.toLocaleString() ?? '—'}
             </p>
+          )}
+          {globalBest && !isRecord && (
+            <p className="subtle best-line">
+              🌍 World best: {globalBest.score.toLocaleString()} by {globalBest.name}
+            </p>
+          )}
+          {!player && (
+            <div className="name-form">
+              <input
+                type="text"
+                placeholder="Player name"
+                maxLength={16}
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') savePlayerName();
+                }}
+              />
+              <button className="ghost-btn" onClick={savePlayerName}>
+                Post score
+              </button>
+            </div>
           )}
           <p className="subtle">
             {title} · accuracy {acc.toFixed(1)}% · best combo {stats.maxCombo}
