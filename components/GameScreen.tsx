@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { analyzeAudio, CHART_VERSION } from '@/lib/analyze';
 import { serializeChart, deserializeChart } from '@/lib/chart-io';
 import { decodeAudio } from '@/lib/aiff';
+import { renderShareCard } from '@/lib/share-card';
 import { DEMO_SONG, getDemoSong } from '@/lib/demo-song';
 import { Engine } from '@/lib/game/engine';
 import {
@@ -440,6 +441,60 @@ export default function GameScreen({
     });
   }, []);
 
+  const shareChallenge = useCallback(async () => {
+    if (!stats || !player) return;
+    setShareMsg('Creating card…');
+    const url = `${window.location.origin}/play/${songId}?vs=${encodeURIComponent(player)}`;
+    const text = `Beat my ${stats.score.toLocaleString()} on ${title} in MusicMasher!`;
+    const blob = await renderShareCard({
+      title,
+      grade: grade(stats),
+      score: stats.score,
+      acc: accuracy(stats),
+      maxCombo: stats.maxCombo,
+      player,
+      artUrl,
+      url,
+    });
+    const file = blob
+      ? new File([blob], 'musicmasher-challenge.png', { type: 'image/png' })
+      : null;
+
+    // Native share with the card attached, where supported (mobile).
+    if (file && navigator.share && navigator.canShare?.({ files: [file] })) {
+      try {
+        await navigator.share({ files: [file], text, url });
+        setShareMsg(null);
+        return;
+      } catch {
+        // user cancelled or share failed — fall through to copy
+      }
+    }
+    if (navigator.share && !file) {
+      try {
+        await navigator.share({ title: 'MusicMasher challenge', text, url });
+        setShareMsg(null);
+        return;
+      } catch {
+        // fall through
+      }
+    }
+    // Desktop fallback: copy the link and download the card.
+    try {
+      await navigator.clipboard.writeText(url);
+      setShareMsg('Challenge link copied!');
+    } catch {
+      setShareMsg(url);
+    }
+    if (blob) {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'musicmasher-challenge.png';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    }
+  }, [artUrl, player, songId, stats, title]);
+
   const exit = useCallback(() => {
     if (document.fullscreenElement) {
       void document.exitFullscreen().catch(() => {});
@@ -672,19 +727,7 @@ export default function GameScreen({
               {player && !failed && (
                 <button
                   className="ghost-btn"
-                  onClick={() => {
-                    const url = `${window.location.origin}/play/${songId}?vs=${encodeURIComponent(player)}`;
-                    if (navigator.share) {
-                      void navigator
-                        .share({ title: 'Beat my MusicMasher score!', url })
-                        .catch(() => {});
-                    } else {
-                      void navigator.clipboard
-                        .writeText(url)
-                        .then(() => setShareMsg('Challenge link copied!'))
-                        .catch(() => setShareMsg(url));
-                    }
-                  }}
+                  onClick={() => void shareChallenge()}
                 >
                   📣 &nbsp;Challenge friends
                 </button>
