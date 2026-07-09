@@ -508,6 +508,9 @@ export class Engine {
   private tapLane(lane: number): void {
     const now = performance.now();
     this.pressUntil[lane] = now + 130;
+    // Subtle press tick on every tap; a judgement buzz that follows in the
+    // same call replaces it, so hits read as one slightly stronger pulse.
+    buzz(6);
     const t = this.songTime() - this.effOffset();
 
     // A double waiting for its second tap takes priority.
