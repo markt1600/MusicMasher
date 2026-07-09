@@ -28,6 +28,7 @@ interface PendingUpload {
   ext: string;
   title: string;
   artist: string;
+  art: Blob | null;
 }
 
 function formatDuration(sec: number): string {
@@ -110,19 +111,42 @@ async function measureDuration(data: ArrayBuffer): Promise<number> {
   return buf.duration;
 }
 
-/** Read embedded title/artist tags (ID3, MP4 atoms, RIFF INFO, AIFF chunks). */
+/** Downscale embedded album art to a small square JPEG for the library. */
+async function downscaleArt(src: Blob): Promise<Blob | null> {
+  try {
+    const bmp = await createImageBitmap(src);
+    const size = 256;
+    const canvas = document.createElement('canvas');
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    const s = Math.min(bmp.width, bmp.height);
+    ctx.drawImage(bmp, (bmp.width - s) / 2, (bmp.height - s) / 2, s, s, 0, 0, size, size);
+    return await new Promise((res) => canvas.toBlob(res, 'image/jpeg', 0.82));
+  } catch {
+    return null;
+  }
+}
+
+/** Read embedded title/artist tags and cover art (ID3, MP4 atoms, RIFF, AIFF). */
 async function readTags(
   file: File
-): Promise<{ title: string | null; artist: string | null }> {
+): Promise<{ title: string | null; artist: string | null; art: Blob | null }> {
   try {
     const mm = await import('music-metadata');
-    const meta = await mm.parseBlob(file, { duration: false, skipCovers: true });
+    const meta = await mm.parseBlob(file, { duration: false });
+    const pic = meta.common.picture?.[0];
+    const art = pic
+      ? await downscaleArt(new Blob([pic.data as BlobPart], { type: pic.format }))
+      : null;
     return {
       title: meta.common.title?.trim() || null,
       artist: meta.common.artist?.trim() || null,
+      art,
     };
   } catch {
-    return { title: null, artist: null };
+    return { title: null, artist: null, art: null };
   }
 }
 
@@ -186,7 +210,7 @@ export default function LibraryPage() {
         );
 
   const doUpload = useCallback(
-    async (file: File, ext: string, title: string, artist: string) => {
+    async (file: File, ext: string, title: string, artist: string, art: Blob | null) => {
       setUploading(true);
       setProgress(null);
       setError(null);
@@ -214,6 +238,19 @@ export default function LibraryPage() {
             contentType: EXT_TYPES[ext],
             onUploadProgress: ({ percentage }) => setProgress(percentage),
           });
+          let artUrl: string | undefined;
+          if (art) {
+            try {
+              const artBlob = await uploadPresigned(`songs/${id}/art.jpg`, art, {
+                access: 'public',
+                handleUploadUrl: '/api/songs/upload',
+                contentType: 'image/jpeg',
+              });
+              artUrl = artBlob.url;
+            } catch {
+              // art is optional — continue without it
+            }
+          }
           const reg = await fetch('/api/songs/register', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -225,6 +262,7 @@ export default function LibraryPage() {
               duration,
               size: file.size,
               audioUrl: blob.url,
+              artUrl,
             }),
           });
           if (!reg.ok) {
@@ -239,6 +277,7 @@ export default function LibraryPage() {
           form.set('artist', artist);
           form.set('ext', ext);
           form.set('duration', String(duration));
+          if (art) form.set('art', art);
           await new Promise<void>((resolve, reject) => {
             const xhr = new XMLHttpRequest();
             xhr.open('POST', '/api/songs');
@@ -302,7 +341,7 @@ export default function LibraryPage() {
       setStatus(null);
 
       if (tags.title && tags.artist) {
-        await doUpload(file, ext, tags.title, tags.artist);
+        await doUpload(file, ext, tags.title, tags.artist, tags.art);
       } else {
         // Missing embedded info — ask the player to fill it in.
         setPending({
@@ -310,6 +349,7 @@ export default function LibraryPage() {
           ext,
           title: tags.title ?? fileStem(file.name),
           artist: tags.artist ?? '',
+          art: tags.art,
         });
       }
     },
@@ -320,9 +360,9 @@ export default function LibraryPage() {
     if (!pending) return;
     const title = pending.title.trim() || fileStem(pending.file.name);
     const artist = pending.artist.trim() || 'Unknown Artist';
-    const { file, ext } = pending;
+    const { file, ext, art } = pending;
     setPending(null);
-    void doUpload(file, ext, title, artist);
+    void doUpload(file, ext, title, artist, art);
   }, [doUpload, pending]);
 
   const playRandom = useCallback(() => {
@@ -407,6 +447,7 @@ export default function LibraryPage() {
             world={worldBests[s.id]}
             href={`/play/${s.id}`}
             icon="🎧"
+            artUrl={s.artUrl}
           />
         ))}
         {songs?.length === 0 && (
@@ -573,6 +614,7 @@ function SongCard({
   icon,
   best,
   world,
+  artUrl,
 }: {
   title: string;
   sub: string;
@@ -580,6 +622,7 @@ function SongCard({
   icon: string;
   best?: number;
   world?: { name: string; score: number };
+  artUrl?: string;
 }) {
   const hue = hashHue(title);
   return (
@@ -590,7 +633,12 @@ function SongCard({
           background: `linear-gradient(140deg, hsl(${hue}, 85%, 55%), hsl(${(hue + 70) % 360}, 85%, 45%))`,
         }}
       >
-        {icon}
+        {artUrl ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={artUrl} alt="" className="song-art-img" loading="lazy" />
+        ) : (
+          icon
+        )}
       </div>
       <div className="song-info">
         <div className="song-title">{title}</div>

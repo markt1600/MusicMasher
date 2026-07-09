@@ -9,6 +9,8 @@ export interface SongMeta {
   audioUrl: string;
   /** File extension: mp3 | aac | m4a | aiff | aif | wav. Legacy entries lack it (mp3). */
   ext?: string;
+  /** Album art URL (extracted from embedded tags at upload time). */
+  artUrl?: string;
   size: number;
   createdAt: string;
   /** Total times this song has been started (all players). */

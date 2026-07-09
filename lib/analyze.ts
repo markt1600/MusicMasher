@@ -15,6 +15,9 @@ const WIN = 1024;
 const HOP = 512;
 const ENVELOPE_RATE = 30; // samples per second, for visuals
 
+/** Bump when the chart algorithm changes — invalidates server-cached charts. */
+export const CHART_VERSION = 2;
+
 // Deterministic PRNG so charts are identical across devices.
 function mulberry32(seed: number) {
   let a = seed >>> 0;
@@ -184,8 +187,9 @@ export async function analyzeAudio(
     return 2;
   }
 
-  // --- BPM estimate via flux autocorrelation --------------------------------
+  // --- BPM estimate via flux autocorrelation + beat-grid fit ----------------
   const bpm = estimateBpm(flux, frameDt);
+  const grid = fitBeatGrid(flux, frameDt, bpm);
 
   // --- envelope for visuals --------------------------------------------------
   const envLen = Math.max(1, Math.ceil(duration * ENVELOPE_RATE));
@@ -206,9 +210,84 @@ export async function analyzeAudio(
   }
 
   // --- difficulty-ramped note selection --------------------------------------
-  const notes = buildNotes(onsets, duration, bpm, envelope, ENVELOPE_RATE, difficulty);
+  const notes = buildNotes(onsets, duration, bpm, envelope, ENVELOPE_RATE, difficulty, grid);
 
-  return { notes, bpm, duration, envelope, envelopeRate: ENVELOPE_RATE };
+  return {
+    notes,
+    bpm: Math.round((60 / grid.period) * 10) / 10,
+    duration,
+    envelope,
+    envelopeRate: ENVELOPE_RATE,
+  };
+}
+
+interface BeatGrid {
+  /** Seconds per beat. */
+  period: number;
+  /** Time of the first beat. */
+  phase: number;
+  /** Time of the first downbeat (bar start). */
+  downPhase: number;
+  /** How much louder the grid positions are vs. average — >1.35 is trustworthy. */
+  confidence: number;
+}
+
+/**
+ * Fit a beat grid to the onset-strength envelope: search small tempo
+ * perturbations × all phases for the alignment that captures the most flux,
+ * then pick the downbeat as the strongest of the four beat positions.
+ */
+function fitBeatGrid(flux: Float32Array, frameDt: number, bpm: number): BeatGrid {
+  const n = flux.length;
+  const total = n * frameDt;
+  const fluxAt = (t: number) => {
+    const i = t / frameDt;
+    const i0 = Math.floor(i);
+    if (i0 < 0 || i0 + 1 >= n) return 0;
+    const fr = i - i0;
+    return flux[i0] * (1 - fr) + flux[i0 + 1] * fr;
+  };
+
+  const period0 = 60 / bpm;
+  let best = { score: -Infinity, period: period0, phase: 0 };
+  for (let dp = -4; dp <= 4; dp++) {
+    const period = period0 * (1 + dp * 0.003);
+    for (let ph = 0; ph < period; ph += frameDt) {
+      let s = 0;
+      let count = 0;
+      for (let t = ph; t < total; t += period) {
+        s += fluxAt(t);
+        count++;
+      }
+      const score = count > 0 ? s / count : 0;
+      if (score > best.score) best = { score, period, phase: ph };
+    }
+  }
+
+  let mean = 0;
+  for (let i = 0; i < n; i++) mean += flux[i];
+  mean /= Math.max(1, n);
+  const confidence = best.score / (mean + 1e-9);
+
+  // Downbeat: the strongest of the four beat offsets within a bar.
+  let downPhase = best.phase;
+  let downScore = -Infinity;
+  for (let k = 0; k < 4; k++) {
+    const start = best.phase + k * best.period;
+    let s = 0;
+    let count = 0;
+    for (let t = start; t < total; t += best.period * 4) {
+      s += fluxAt(t);
+      count++;
+    }
+    const sc = count > 0 ? s / count : 0;
+    if (sc > downScore) {
+      downScore = sc;
+      downPhase = start;
+    }
+  }
+
+  return { period: best.period, phase: best.phase, downPhase, confidence };
 }
 
 function estimateBpm(flux: Float32Array, frameDt: number): number {
@@ -243,12 +322,61 @@ function buildNotes(
   bpm: number,
   envelope: Float32Array,
   envelopeRate: number,
-  difficulty = 1
+  difficulty = 1,
+  grid?: BeatGrid
 ): Note[] {
   const rng = mulberry32(Math.round(duration * 1000) ^ (onsets.length << 8));
   // Gauntlet stages: denser charts and more flourishes at higher difficulty.
   const gapScale = Math.max(0.65, 1 - 0.08 * (difficulty - 1));
   const flourishMul = 1 + 0.18 * (difficulty - 1);
+
+  // --- musical grid helpers -------------------------------------------------
+  // With a confident tempo fit, note times snap to 16th-note subdivisions so
+  // tiles land squarely on the music; low confidence (rubato, live takes)
+  // keeps raw onset times.
+  const gridOk = !!grid && grid.confidence >= 1.35;
+  const snap = (t: number): number => {
+    if (!gridOk || !grid) return t;
+    const sub = grid.period / 4;
+    const k = Math.round((t - grid.phase) / sub);
+    const tq = grid.phase + k * sub;
+    return Math.abs(tq - t) <= Math.min(0.05, sub * 0.35) ? tq : t;
+  };
+  const onBeat = (t: number): boolean => {
+    if (!gridOk || !grid) return true; // no grid → don't restrict
+    const rel = (((t - grid.downPhase) % grid.period) + grid.period) % grid.period;
+    return rel < 0.06 || rel > grid.period - 0.06;
+  };
+
+  // --- local intensity: how loud is the song around t, 0..1 -----------------
+  // Smoothed over ~2 bars and normalized by the 90th percentile, so chart
+  // density follows the song's arc (drops dense, bridges sparse).
+  const barLen = gridOk && grid ? grid.period * 4 : 2;
+  const intensityStep = 0.25;
+  const intensityArr: number[] = [];
+  for (let t = 0; t < duration; t += intensityStep) {
+    let sum = 0;
+    let n = 0;
+    for (let u = t - barLen; u <= t + barLen; u += 1 / envelopeRate) {
+      const idx = Math.floor(u * envelopeRate);
+      if (idx >= 0 && idx < envelope.length) {
+        sum += envelope[idx];
+        n++;
+      }
+    }
+    intensityArr.push(n > 0 ? sum / n : 0);
+  }
+  const sortedInt = [...intensityArr].sort((a, b) => a - b);
+  const p90 = sortedInt[Math.floor(sortedInt.length * 0.9)] || 1;
+  for (let i = 0; i < intensityArr.length; i++) {
+    intensityArr[i] = Math.min(1, intensityArr[i] / (p90 + 1e-9));
+  }
+  const intensityAt = (t: number) =>
+    intensityArr[Math.max(0, Math.min(intensityArr.length - 1, Math.floor(t / intensityStep)))] ?? 0.5;
+
+  /** Density driver: progressive difficulty blended with the song's energy. */
+  const driveAt = (t: number, p: number) =>
+    Math.min(1, 0.55 * easeInOut(p) + 0.45 * intensityAt(t) ** 1.2);
 
   // Fallback for songs where onset detection finds almost nothing: lay tiles
   // on a straight beat grid so every upload is still playable.
@@ -308,11 +436,13 @@ function buildNotes(
     if (o.t < 1.2 || o.t > duration - 0.5) continue;
     const p = Math.min(1, o.t / duration);
     const ramp = easeInOut(p);
+    // Density follows both song progress and the music's local energy.
+    const drive = driveAt(o.t, p);
 
-    const minGap = (0.42 - 0.26 * ramp) * gapScale; // 0.42 s → 0.16 s (tighter in gauntlet)
+    const minGap = (0.42 - 0.28 * drive) * gapScale; // sparse when quiet/early → dense at the drop
     if (o.t - lastT < minGap) continue;
 
-    const cut = quantile((0.55 * (1 - ramp)) / flourishMul); // top 45% early → everything late
+    const cut = quantile((0.55 * (1 - drive)) / flourishMul);
     if (o.strength < cut) continue;
 
     const next = onsets[i + 1];
@@ -320,7 +450,7 @@ function buildNotes(
 
     // --- Stream: a run of rapid onsets (fills, rolls) becomes a burst of
     // alternating tiles riding the actual hits. Late-game only.
-    if (p > 0.5 && gapToNext <= 0.24 && rng() < (0.12 + 0.3 * ramp) * flourishMul) {
+    if (p > 0.5 && gapToNext <= 0.24 && rng() < (0.12 + 0.3 * drive) * flourishMul) {
       let run = 1;
       while (
         i + run < onsets.length &&
@@ -335,7 +465,7 @@ function buildNotes(
         for (let k = 0; k < run; k++) {
           const on = onsets[i + k];
           if (on.t > duration - 0.5) break;
-          notes.push({ t: on.t, lane });
+          notes.push({ t: snap(on.t), lane });
           lane = (lane + dir) % 3;
         }
         lastT = onsets[i + run - 1].t;
@@ -356,10 +486,10 @@ function buildNotes(
       o.strength >= quantile(0.45) &&
       next.strength >= quantile(0.35) &&
       o.t - lastT >= minGap * 1.25 &&
-      rng() < (0.25 + 0.35 * ramp) * flourishMul
+      rng() < (0.25 + 0.35 * drive) * flourishMul
     ) {
       const lane = pickLane(o, o.t - lastT);
-      notes.push({ t: o.t, lane, kind: 'double' });
+      notes.push({ t: snap(o.t), lane, kind: 'double' });
       lastT = next.t;
       lastLane = lane;
       i++; // the second hit is consumed by this tile
@@ -382,7 +512,7 @@ function buildNotes(
       dur = Math.min(dur, duration - 0.4 - o.t);
       if (dur >= 0.6) {
         const lane = pickLane(o, o.t - lastT);
-        notes.push({ t: o.t, lane, kind: 'hold', dur });
+        notes.push({ t: snap(o.t), lane, kind: 'hold', dur });
         lastT = o.t + dur + 0.1; // onsets during the hold are skipped
         lastLane = lane;
         continue;
@@ -398,26 +528,27 @@ function buildNotes(
       o.t - lastT >= minGap * 1.4 &&
       rng() < 0.35
     ) {
-      notes.push({ t: o.t, lane, kind: 'bonus' });
+      notes.push({ t: snap(o.t), lane, kind: 'bonus' });
       lastBonusT = o.t;
       lastT = o.t;
       lastLane = lane;
       continue;
     }
 
-    // --- Plain tap (+ chord on strong, well-spaced hits after 30%).
-    notes.push({ t: o.t, lane });
+    // --- Plain tap (+ chord on strong hits after 30%, preferring downbeats).
+    notes.push({ t: snap(o.t), lane });
 
-    const chordChance = p > 0.3 ? ((p - 0.3) / 0.7) * 0.4 * flourishMul : 0;
+    const chordChance = p > 0.3 ? (0.1 + 0.4 * drive) * flourishMul : 0;
     if (
       chordChance > 0 &&
       o.strength >= quantile(0.75) &&
+      (onBeat(o.t) || o.strength >= quantile(0.92)) &&
       o.t - lastT >= minGap * 1.6 &&
       rng() < chordChance
     ) {
       const offsets = [1, 2];
       const second = (lane + offsets[Math.floor(rng() * 2)]) % 3;
-      notes.push({ t: o.t, lane: second });
+      notes.push({ t: snap(o.t), lane: second });
     }
 
     lastT = o.t;

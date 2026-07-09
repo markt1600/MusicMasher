@@ -58,11 +58,29 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: 'Invalid size' }, { status: 400 });
     }
 
+    // Optional album art — must be this song's blob path.
+    let artUrl: string | undefined;
+    if (body.artUrl) {
+      try {
+        const au = new URL(String(body.artUrl));
+        if (
+          au.protocol === 'https:' &&
+          au.hostname.endsWith('.public.blob.vercel-storage.com') &&
+          au.pathname === `/songs/${id}/art.jpg`
+        ) {
+          artUrl = au.toString();
+        }
+      } catch {
+        // ignore invalid art URL — art is optional
+      }
+    }
+
     const meta: SongMeta = {
       id,
       title: sanitizeTitle(String(body.title ?? '')),
       artist: sanitizeTitle(String(body.artist ?? ''), ''),
       ext,
+      artUrl,
       duration: Math.round(duration * 100) / 100,
       audioUrl,
       size: Math.round(size),

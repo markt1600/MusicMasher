@@ -83,17 +83,24 @@ export async function POST(request: Request) {
     }
 
     const bytes = Buffer.from(await file.arrayBuffer());
+    const art = form.get('art');
+    const artBytes =
+      art instanceof File && art.size > 0 && art.size < 2 * 1024 * 1024
+        ? Buffer.from(await art.arrayBuffer())
+        : null;
     const meta = await saveLocalSong(
       {
         id,
         title,
         artist,
         ext,
+        artUrl: artBytes ? `/api/songs/${id}/art` : undefined,
         duration: Math.round(duration * 100) / 100,
         size: bytes.length,
         createdAt: new Date().toISOString(),
       },
-      bytes
+      bytes,
+      artBytes
     );
     return NextResponse.json({ song: meta });
   } catch (err) {

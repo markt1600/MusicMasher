@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter } from 'next/navigation';
-import { analyzeAudio } from '@/lib/analyze';
+import { analyzeAudio, CHART_VERSION } from '@/lib/analyze';
+import { serializeChart, deserializeChart } from '@/lib/chart-io';
 import { decodeAudio } from '@/lib/aiff';
 import { DEMO_SONG, getDemoSong } from '@/lib/demo-song';
 import { Engine } from '@/lib/game/engine';
@@ -66,10 +67,13 @@ function grade(stats: GameStats): string {
 export default function GameScreen({
   songId,
   runStage = 0,
+  vsName,
 }: {
   songId: string;
   /** 0 = normal play; 1..5 = gauntlet stage. */
   runStage?: number;
+  /** Race a specific player's ghost (from a challenge link). */
+  vsName?: string;
 }) {
   const router = useRouter();
   const inRun = runStage > 0;
@@ -85,6 +89,7 @@ export default function GameScreen({
   const [loadingMsg, setLoadingMsg] = useState('Loading song…');
   const [analyzePct, setAnalyzePct] = useState<number | null>(null);
   const [title, setTitle] = useState('');
+  const [artUrl, setArtUrl] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [stats, setStats] = useState<GameStats | null>(null);
   const [offsetMs, setOffsetMs] = useState(0);
@@ -103,6 +108,9 @@ export default function GameScreen({
   const [runTotal, setRunTotal] = useState(0);
   const [advancing, setAdvancing] = useState(false);
   const [failed, setFailed] = useState(false);
+  const [ghost, setGhost] = useState<{ name: string; score: number; events: number[][] } | null>(null);
+  const [shareMsg, setShareMsg] = useState<string | null>(null);
+  const replayRef = useRef<number[][] | null>(null);
 
   // ---------------------------------------------------------------------
   // Load: fetch (or synthesize) audio → decode → analyze beats
@@ -141,6 +149,7 @@ export default function GameScreen({
             ? `${song.title} — ${song.artist}`
             : (song.title as string);
           setTitle(songTitle);
+          if (song.artUrl) setArtUrl(song.artUrl);
 
           setLoadingMsg('Downloading audio…');
           const audioRes = await fetch(song.audioUrl);
@@ -153,10 +162,42 @@ export default function GameScreen({
         }
         if (cancelled) return;
 
-        let map: Beatmap;
+        // Someone to race: a specific challenger's ghost, or the record holder's.
+        if (difficulty === 1 && !cancelled) {
+          try {
+            const q = vsName ? `?name=${encodeURIComponent(vsName)}` : '';
+            const gr = await fetch(`/api/ghosts/${songId}${q}`);
+            if (gr.ok) {
+              const gd = await gr.json();
+              if (Array.isArray(gd.events) && gd.events.length > 0 && !cancelled) {
+                setGhost({ name: gd.name, score: gd.score, events: gd.events });
+              }
+            }
+          } catch {
+            // no ghost — race yourself
+          }
+        }
+
+        let map: Beatmap | null = null;
         if (songId === 'demo' && difficulty === 1 && demoMapCache) {
           map = demoMapCache;
-        } else {
+        }
+        // Charts are deterministic — reuse the shared server-side cache.
+        if (!map && songId !== 'demo') {
+          try {
+            const r = await fetch(
+              `/api/charts/${songId}?v=${CHART_VERSION}&d=${difficulty}`
+            );
+            if (r.ok) {
+              map = deserializeChart(await r.json());
+              if (map) console.log('[MusicMasher] chart loaded from shared cache');
+            }
+          } catch {
+            // cache miss/offline — analyze locally
+          }
+        }
+        if (cancelled) return;
+        if (!map) {
           setLoadingMsg('Analyzing beats…');
           setAnalyzePct(0);
           map = await analyzeAudio(
@@ -166,6 +207,14 @@ export default function GameScreen({
             },
             difficulty
           );
+          if (!cancelled && songId !== 'demo' && map.notes.length > 0) {
+            // Share the result so the next player skips analysis.
+            void fetch(`/api/charts/${songId}?v=${CHART_VERSION}&d=${difficulty}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: serializeChart(map),
+            }).catch(() => {});
+          }
         }
         if (cancelled) return;
         if (map.notes.length === 0) {
@@ -201,7 +250,7 @@ export default function GameScreen({
       engineRef.current = null;
       void audioCtx.close();
     };
-  }, [songId, difficulty]);
+  }, [songId, difficulty, vsName]);
 
   // Auto-pause when the tab is hidden mid-game.
   useEffect(() => {
@@ -231,6 +280,8 @@ export default function GameScreen({
     setIsRecord(false);
     setFailed(false);
     setBestResult(null);
+    setShareMsg(null);
+    replayRef.current = null;
 
     // On touch devices, go fullscreen for the game (iOS Safari doesn't
     // support the Fullscreen API — it simply no-ops there).
@@ -256,6 +307,7 @@ export default function GameScreen({
       title,
       {
         onEnd: (s, didFail) => {
+          replayRef.current = engineRef.current?.getReplay() ?? null;
           setStats(s);
           setFailed(didFail);
           // Personal/global bests only count for completed songs on normal
@@ -287,6 +339,7 @@ export default function GameScreen({
         theme,
         difficulty,
         stageLabel: inRun ? `STAGE ${runStage}/5` : '',
+        ghost: !inRun && ghost ? { name: ghost.name, events: ghost.events } : undefined,
       }
     );
     engine.offsetMs = Number(localStorage.getItem(OFFSET_KEY) ?? 0) || 0;
@@ -299,7 +352,7 @@ export default function GameScreen({
       playCounted.current = true;
       void fetch(`/api/songs/${songId}/play`, { method: 'POST' }).catch(() => {});
     }
-  }, [difficulty, inRun, runStage, songId, theme, title]);
+  }, [difficulty, ghost, inRun, runStage, songId, theme, title]);
 
   const nextStage = useCallback(async () => {
     setAdvancing(true);
@@ -335,6 +388,13 @@ export default function GameScreen({
           const data = await res.json();
           setGlobalBest(data.best ?? null);
           setIsRecord(Boolean(data.isRecord));
+          if (data.updated && replayRef.current && replayRef.current.length > 0) {
+            void fetch(`/api/ghosts/${songId}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ name, events: replayRef.current }),
+            }).catch(() => {});
+          }
         }
       } catch {
         // offline — the local best is still recorded
@@ -435,7 +495,16 @@ export default function GameScreen({
 
       {phase === 'ready' && (
         <div className="overlay">
+          {artUrl && (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img src={artUrl} alt="" className="ready-art" />
+          )}
           <h1>{title}</h1>
+          {ghost && !inRun && (
+            <p className="subtle ghost-line">
+              👻 Racing <b>{ghost.name}</b> — {ghost.score.toLocaleString()}
+            </p>
+          )}
           <p className="subtle">
             {beatmapRef.current?.notes.length} tiles ·{' '}
             {Math.round(beatmapRef.current?.bpm ?? 0)} BPM — tap the tiles as
@@ -472,6 +541,13 @@ export default function GameScreen({
           </div>
           <p className="subtle">
             Hits feel late? Increase the offset. Feel early? Decrease it.
+            {engineRef.current !== null &&
+              engineRef.current.autoLatencyMs > 0 && (
+                <>
+                  <br />
+                  Auto latency compensation: {engineRef.current.autoLatencyMs} ms
+                </>
+              )}
           </p>
         </div>
       )}
@@ -593,6 +669,27 @@ export default function GameScreen({
               <button className="big-btn" onClick={() => void startGame()}>
                 ↻ &nbsp;Play again
               </button>
+              {player && !failed && (
+                <button
+                  className="ghost-btn"
+                  onClick={() => {
+                    const url = `${window.location.origin}/play/${songId}?vs=${encodeURIComponent(player)}`;
+                    if (navigator.share) {
+                      void navigator
+                        .share({ title: 'Beat my MusicMasher score!', url })
+                        .catch(() => {});
+                    } else {
+                      void navigator.clipboard
+                        .writeText(url)
+                        .then(() => setShareMsg('Challenge link copied!'))
+                        .catch(() => setShareMsg(url));
+                    }
+                  }}
+                >
+                  📣 &nbsp;Challenge friends
+                </button>
+              )}
+              {shareMsg && <p className="subtle">{shareMsg}</p>}
               <button className="ghost-btn" onClick={exit}>
                 ♫ &nbsp;Choose another song
               </button>

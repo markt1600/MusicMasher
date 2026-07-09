@@ -11,6 +11,14 @@ export default async function PlayPage({
   const sp = await searchParams;
   const runStage =
     sp.run === '1' ? Math.min(5, Math.max(1, Number(sp.stage) || 1)) : 0;
+  const vsName = typeof sp.vs === 'string' ? sp.vs.slice(0, 16) : undefined;
   // key forces a clean remount for each gauntlet stage
-  return <GameScreen key={`${id}-${runStage}`} songId={id} runStage={runStage} />;
+  return (
+    <GameScreen
+      key={`${id}-${runStage}`}
+      songId={id}
+      runStage={runStage}
+      vsName={vsName}
+    />
+  );
 }

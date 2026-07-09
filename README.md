@@ -21,9 +21,24 @@ Built for mobile touch screens first, with full desktop keyboard support.
   song to build the shared library. In local dev without a Blob token, files
   are stored on disk under `.data/` instead — no config needed.
 - **Beat detection** — runs client-side with the Web Audio API: mono downmix →
-  STFT → spectral-flux onset detection with adaptive thresholds, plus a BPM
-  estimate from autocorrelation. Charts are fully deterministic, so every
-  player gets the same tiles for the same song.
+  STFT → spectral-flux onset detection with adaptive thresholds, a BPM
+  estimate from autocorrelation, and a fitted beat grid (tempo + phase +
+  downbeats). When the tempo fit is confident, notes quantize to 16th-note
+  subdivisions so tiles land squarely on the music, chords prefer downbeats,
+  and chart density follows the song's energy arc (drops dense, bridges
+  sparse). Charts are fully deterministic, so every player gets the same
+  tiles — and the first player's chart is cached server-side so everyone
+  after loads instantly.
+- **Album art** — cover art embedded in the file's tags is extracted at
+  upload, downscaled in the browser, and shown in the library and on the
+  song's ready screen.
+- **Ghost battles** — your best runs are recorded as replays. Playing a song
+  automatically races the world-record holder's ghost (live score + hit
+  sparks), and a "Challenge friends" button shares a link that races *your*
+  ghost: `/play/<song>?vs=<name>`.
+- **PWA** — installable to the home screen (manifest + service worker),
+  vibration feedback on hits and milestones where supported, and automatic
+  audio output-latency compensation on top of the manual offset.
 - **Difficulty ramp** — early in a song only the strongest beats become tiles
   with generous spacing; as the song progresses the density threshold drops,
   minimum spacing shrinks (0.42 s → 0.16 s), scroll speed increases, and

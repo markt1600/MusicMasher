@@ -31,14 +31,18 @@ export async function POST(request: Request) {
       body,
       request,
       getSignedToken: async (pathname) => {
-        if (!/^songs\/[a-z0-9]{8,32}\/audio\.(mp3|aac|m4a|aiff|aif|wav)$/.test(pathname)) {
+        const isAudio = /^songs\/[a-z0-9]{8,32}\/audio\.(mp3|aac|m4a|aiff|aif|wav)$/.test(pathname);
+        const isArt = /^songs\/[a-z0-9]{8,32}\/art\.jpg$/.test(pathname);
+        if (!isAudio && !isArt) {
           throw new Error('Invalid upload path');
         }
         const token = await issueSignedToken({
           pathname,
           operations: ['put'],
-          allowedContentTypes: [...new Set(Object.values(AUDIO_TYPES))],
-          maximumSizeInBytes: MAX_SONG_BYTES,
+          allowedContentTypes: isArt
+            ? ['image/jpeg']
+            : [...new Set(Object.values(AUDIO_TYPES))],
+          maximumSizeInBytes: isArt ? 2 * 1024 * 1024 : MAX_SONG_BYTES,
           validUntil: Date.now() + 15 * 60 * 1000,
         });
         return { token };

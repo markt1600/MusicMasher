@@ -200,6 +200,23 @@ button {
   place-items: center;
   font-size: 22px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.song-art-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.ready-art {
+  width: 108px;
+  height: 108px;
+  border-radius: 20px;
+  object-fit: cover;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.55), 0 0 30px rgba(55, 245, 228, 0.2);
+  border: 1px solid var(--border);
 }
 
 .song-info {

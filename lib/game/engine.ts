@@ -151,6 +151,8 @@ export interface EngineOptions {
   difficulty?: number;
   /** Shown in the HUD during gauntlet runs, e.g. "STAGE 2/5". */
   stageLabel?: string;
+  /** A recorded run to race against: score events as [t, score, combo, lane]. */
+  ghost?: { name: string; events: number[][] };
 }
 
 export interface EngineCallbacks {
@@ -178,6 +180,17 @@ function easeOutBack(x: number): number {
   return 1 + (c + 1) * (x - 1) ** 3 + c * (x - 1) ** 2;
 }
 
+/** Vibration feedback where supported (Android Chrome; iOS lacks the API). */
+function buzz(pattern: number | number[]): void {
+  if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+    try {
+      navigator.vibrate(pattern);
+    } catch {
+      // blocked — ignore
+    }
+  }
+}
+
 /** Chunky, playful font stack for the score and celebration popups. */
 const COMIC_FONT =
   `'Comic Sans MS', 'Chalkboard SE', 'Comic Neue', 'Marker Felt', ` +
@@ -202,6 +215,17 @@ export class Engine {
   private paused = false;
 
   offsetMs = 0;
+  /** Automatic hardware output-latency compensation (seconds), set at start. */
+  private autoLatency = 0;
+
+  get autoLatencyMs(): number {
+    return Math.round(this.autoLatency * 1000);
+  }
+
+  /** Manual offset plus automatic output-latency compensation, in seconds. */
+  private effOffset(): number {
+    return this.offsetMs / 1000 + this.autoLatency;
+  }
 
   // scoring
   private score = 0;
@@ -226,6 +250,13 @@ export class Engine {
   private pressUntil = new Float64Array(LANES);
 
   private skyEvents: SkyEvent[] = [];
+
+  // replay recording + ghost opponent
+  private replayEvents: number[][] = [];
+  private lastReplayRec = -10;
+  private ghost: { name: string; events: number[][] } | null = null;
+  private ghostIdx = 0;
+  private ghostScore = 0;
 
   // hold-note input state
   private laneHeld = new Int8Array(LANES); // count of pointers+keys down
@@ -276,6 +307,7 @@ export class Engine {
     this.theme = THEMES[Math.abs(Math.round(opts.theme ?? 0)) % THEMES.length];
     this.difficulty = Math.max(1, Math.min(5, opts.difficulty ?? 1));
     this.stageLabel = opts.stageLabel ?? '';
+    this.ghost = opts.ghost ?? null;
     this.notes = [...map.notes]
       .sort((a, b) => a.t - b.t)
       .map((n) => ({
@@ -312,6 +344,10 @@ export class Engine {
     this.startCtxTime = this.audioCtx.currentTime + LEAD_IN;
     src.start(this.startCtxTime);
     this.source = src;
+    // Hardware output latency (headphones/Bluetooth) — compensate judging
+    // and visuals automatically; the manual offset stays for fine-tuning.
+    const out = this.audioCtx.outputLatency ?? 0;
+    this.autoLatency = Math.min(0.25, Math.max(0, out));
     this.loop();
   }
 
@@ -438,7 +474,7 @@ export class Engine {
 
   /** A lane went fully up — settle any hold riding it. */
   private releaseLane(lane: number): void {
-    const t = this.songTime() - this.offsetMs / 1000;
+    const t = this.songTime() - this.effOffset();
     for (const n of this.liveHolds) {
       if (n.lane === lane && n.holding && !n.holdDone) {
         n.holding = false;
@@ -465,13 +501,14 @@ export class Engine {
         color: '#9dffc9',
       });
       this.spawnHitEffects(n.lane, 'great');
+      this.recordReplay(n.lane);
     }
   }
 
   private tapLane(lane: number): void {
     const now = performance.now();
     this.pressUntil[lane] = now + 130;
-    const t = this.songTime() - this.offsetMs / 1000;
+    const t = this.songTime() - this.effOffset();
 
     // A double waiting for its second tap takes priority.
     for (let i = this.nextJudgeIdx; i < this.notes.length; i++) {
@@ -550,8 +587,11 @@ export class Engine {
       const mult = 1 + Math.min(this.combo, 100) / 100;
       this.score += SCORE_VALUE[j] * mult;
       this.spawnHitEffects(note.lane, j);
+      if (j === 'perfect') buzz(16);
+      else if (j === 'great') buzz(9);
       if (note.kind === 'bonus') {
         this.score += 300 * mult;
+        buzz([20, 30, 20]);
         this.popups.push({
           born: note.judgedAt,
           title: 'BONUS! ✦',
@@ -581,6 +621,26 @@ export class Engine {
       text: JUDGE_LABEL[j],
       color: JUDGE_COLOR[j],
     });
+    this.recordReplay(note.lane);
+  }
+
+  /** Append a score snapshot to the replay (throttled during hold showers). */
+  private recordReplay(lane: number, throttle = 0): void {
+    const t = this.songTime();
+    if (throttle > 0 && t - this.lastReplayRec < throttle) return;
+    if (this.replayEvents.length >= 6000) return;
+    this.lastReplayRec = t;
+    this.replayEvents.push([
+      Math.round(t * 1000) / 1000,
+      Math.round(this.score),
+      this.combo,
+      lane,
+    ]);
+  }
+
+  /** The recorded run — becomes a ghost others can race. */
+  getReplay(): number[][] {
+    return this.replayEvents;
   }
 
   /** Escalating combo-milestone celebration: popup + firework burst. */
@@ -603,6 +663,7 @@ export class Engine {
     if (!hit) return;
     this.popups.push({ born: now, title: hit[1], sub: `${this.combo} COMBO` });
     this.lastMilestoneAt = now;
+    buzz([30, 40, 30]);
     // Firework burst from the middle of the road.
     for (let i = 0; i < 36; i++) {
       const a = (i / 36) * Math.PI * 2;
@@ -792,7 +853,7 @@ export class Engine {
   };
 
   private update(): void {
-    const t = this.songTime() - this.offsetMs / 1000;
+    const t = this.songTime() - this.effOffset();
 
     // Auto-miss notes that scrolled past the window. Doubles get extra time
     // for their second tap; one-of-two lands as a 'good'.
@@ -822,6 +883,7 @@ export class Engine {
         const mult = 1 + Math.min(this.combo, 100) / 100;
         this.score += HOLD_TICK_SCORE * mult;
         this.checkMilestone(nowMs);
+        this.recordReplay(n.lane, 0.25);
       }
     }
 
@@ -885,6 +947,7 @@ export class Engine {
       );
       if (rate > FAIL_MISS_RATE && !this.ended) {
         this.ended = true;
+        buzz(250);
         cancelAnimationFrame(this.raf);
         try {
           this.source?.stop();
@@ -896,6 +959,24 @@ export class Engine {
       }
     } else {
       this.dangerLevel = 0;
+    }
+
+    // Ghost opponent: advance its score timeline and spark its hits.
+    if (this.ghost) {
+      const ev = this.ghost.events;
+      const now2 = performance.now();
+      while (this.ghostIdx < ev.length && ev[this.ghostIdx][0] <= t) {
+        const e = ev[this.ghostIdx++];
+        this.ghostScore = e[1];
+        if (e[3] >= 0 && e[3] <= 2) {
+          this.rings.push({
+            lane: e[3],
+            born: now2,
+            color: 'rgba(190, 160, 255, 0.5)',
+            ghost: true,
+          });
+        }
+      }
     }
 
     // Song end.
@@ -1465,7 +1546,7 @@ export class Engine {
   }
 
   private drawNotes(g: CanvasRenderingContext2D, t: number, prog: number): void {
-    const tJudge = t - this.offsetMs / 1000;
+    const tJudge = t - this.effOffset();
     const approach = this.approachAt(Math.max(0, t));
 
     g.save();
@@ -2020,6 +2101,30 @@ export class Engine {
       g.fillText(`${acc.toFixed(1)}%`, w / 2, 64 * dpr);
     }
 
+    // Ghost race: the opponent's live score, with ahead/behind coloring.
+    if (this.ghost) {
+      const diff = Math.round(this.shownScore) - this.ghostScore;
+      g.save();
+      g.textAlign = 'center';
+      g.font = `800 ${Math.round(12 * dpr)}px ${COMIC_FONT}`;
+      g.fillStyle = 'rgba(190, 160, 255, 0.9)';
+      g.fillText(
+        `👻 ${this.ghost.name} ${this.ghostScore.toLocaleString()}`,
+        w / 2,
+        (judgedCount > 0 ? 82 : 66) * dpr
+      );
+      if (this.ghostIdx > 0 || this.ghostScore > 0) {
+        g.font = `900 ${Math.round(11 * dpr)}px ${COMIC_FONT}`;
+        g.fillStyle = diff >= 0 ? '#9dffc9' : '#ff7d9d';
+        g.fillText(
+          `${diff >= 0 ? '▲ +' : '▼ '}${diff.toLocaleString()}`,
+          w / 2,
+          (judgedCount > 0 ? 96 : 80) * dpr
+        );
+      }
+      g.restore();
+    }
+
     // Milestone flash: a quick colored glow around the screen edges.
     const flashAge = (now - this.lastMilestoneAt) / 600;
     if (flashAge < 1) {
@@ -2115,7 +2220,7 @@ export class Engine {
       const bw = w * 0.56;
       const bh = 9 * dpr;
       const bx = (w - bw) / 2;
-      const by = 78 * dpr;
+      const by = 112 * dpr; // below the ghost-race readout
 
       g.save();
       g.textAlign = 'center';

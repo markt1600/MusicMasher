@@ -136,20 +136,134 @@ export async function registerBlobSong(meta: SongMeta): Promise<void> {
   });
 }
 
-/** Local mode: persist the audio bytes and metadata to disk. */
+/** Local mode: persist the audio bytes, optional art, and metadata to disk. */
 export async function saveLocalSong(
   meta: Omit<SongMeta, 'audioUrl'>,
-  bytes: Buffer
+  bytes: Buffer,
+  artBytes?: Buffer | null
 ): Promise<SongMeta> {
   const ext = meta.ext && isValidExt(meta.ext) ? meta.ext : 'mp3';
   await fs.mkdir(LOCAL_DIR, { recursive: true });
   await fs.writeFile(path.join(LOCAL_DIR, `${meta.id}.${ext}`), bytes);
+  if (artBytes) {
+    await fs.writeFile(path.join(LOCAL_DIR, `${meta.id}.jpg`), artBytes);
+  }
   const full: SongMeta = { ...meta, audioUrl: `/api/songs/${meta.id}/audio` };
   await fs.writeFile(
     path.join(LOCAL_DIR, `${meta.id}.json`),
     JSON.stringify(full, null, 2)
   );
   return full;
+}
+
+// ---------------------------------------------------------------------------
+// Chart cache — computed charts are deterministic, so the first player's
+// analysis can be reused by everyone (keyed by algorithm version+difficulty)
+// ---------------------------------------------------------------------------
+
+const CHARTS_DIR = path.join(process.cwd(), '.data', 'charts');
+const GHOSTS_DIR = path.join(process.cwd(), '.data', 'ghosts');
+export const MAX_CHART_BYTES = 800 * 1024;
+export const MAX_GHOST_BYTES = 300 * 1024;
+
+// ---------------------------------------------------------------------------
+// Ghost replays — one JSON document per song per player
+// ---------------------------------------------------------------------------
+
+function ghostKey(name: string): string {
+  return Buffer.from(name, 'utf8').toString('base64url');
+}
+
+export async function putGhost(
+  songId: string,
+  name: string,
+  json: string
+): Promise<void> {
+  const key = ghostKey(name);
+  if (storageMode() === 'blob') {
+    await put(`ghosts/${songId}/${key}.json`, json, {
+      access: 'public',
+      contentType: 'application/json',
+      addRandomSuffix: false,
+      allowOverwrite: true,
+    });
+  } else {
+    await fs.mkdir(path.join(GHOSTS_DIR, songId), { recursive: true });
+    await fs.writeFile(path.join(GHOSTS_DIR, songId, `${key}.json`), json);
+  }
+}
+
+export async function getGhost(
+  songId: string,
+  name: string
+): Promise<string | null> {
+  const key = ghostKey(name);
+  if (storageMode() === 'blob') {
+    const pathname = `ghosts/${songId}/${key}.json`;
+    const res = await list({ prefix: pathname, limit: 5 });
+    const blob = res.blobs.find((b) => b.pathname === pathname);
+    if (!blob) return null;
+    try {
+      const r = await fetch(blob.url, { cache: 'no-store' });
+      return r.ok ? await r.text() : null;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return await fs.readFile(path.join(GHOSTS_DIR, songId, `${key}.json`), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+function chartKey(songId: string, version: number, difficulty: number): string {
+  return `${songId}-v${version}-d${difficulty}`;
+}
+
+export async function getCachedChart(
+  songId: string,
+  version: number,
+  difficulty: number
+): Promise<string | null> {
+  const key = chartKey(songId, version, difficulty);
+  if (storageMode() === 'blob') {
+    const pathname = `charts/${songId}/${key}.json`;
+    const res = await list({ prefix: pathname, limit: 5 });
+    const blob = res.blobs.find((b) => b.pathname === pathname);
+    if (!blob) return null;
+    try {
+      const r = await fetch(blob.url, { cache: 'no-store' });
+      return r.ok ? await r.text() : null;
+    } catch {
+      return null;
+    }
+  }
+  try {
+    return await fs.readFile(path.join(CHARTS_DIR, `${key}.json`), 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+export async function putCachedChart(
+  songId: string,
+  version: number,
+  difficulty: number,
+  json: string
+): Promise<void> {
+  const key = chartKey(songId, version, difficulty);
+  if (storageMode() === 'blob') {
+    await put(`charts/${songId}/${key}.json`, json, {
+      access: 'public',
+      contentType: 'application/json',
+      addRandomSuffix: false,
+      allowOverwrite: true,
+    });
+  } else {
+    await fs.mkdir(CHARTS_DIR, { recursive: true });
+    await fs.writeFile(path.join(CHARTS_DIR, `${key}.json`), json);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -314,13 +428,17 @@ export async function updateSongMeta(
   return meta;
 }
 
-/** Remove a song (audio + metadata) from storage. Returns false if absent. */
+/** Remove a song (audio, metadata, cached charts, scores, ghosts). */
 export async function deleteSong(id: string): Promise<boolean> {
   if (!isValidSongId(id)) return false;
   if (storageMode() === 'blob') {
-    const res = await list({ prefix: `songs/${id}/`, limit: 100 });
-    if (res.blobs.length === 0) return false;
-    await del(res.blobs.map((b) => b.url));
+    const urls: string[] = [];
+    for (const prefix of [`songs/${id}/`, `charts/${id}/`, `ghosts/${id}/`, `scores/${id}.json`]) {
+      const res = await list({ prefix, limit: 500 });
+      urls.push(...res.blobs.map((b) => b.url));
+    }
+    if (urls.length === 0) return false;
+    await del(urls);
     return true;
   }
   const meta = await getSong(id);
@@ -328,6 +446,22 @@ export async function deleteSong(id: string): Promise<boolean> {
   const ext = meta.ext && isValidExt(meta.ext) ? meta.ext : 'mp3';
   await fs.rm(path.join(LOCAL_DIR, `${id}.${ext}`), { force: true });
   await fs.rm(path.join(LOCAL_DIR, `${id}.json`), { force: true });
+  await fs.rm(path.join(LOCAL_DIR, `${id}.jpg`), { force: true });
+  await fs.rm(path.join(SCORES_DIR, `${id}.json`), { force: true });
+  try {
+    for (const f of await fs.readdir(CHARTS_DIR)) {
+      if (f.startsWith(`${id}-`)) await fs.rm(path.join(CHARTS_DIR, f), { force: true });
+    }
+  } catch {
+    // no charts dir yet
+  }
+  try {
+    for (const f of await fs.readdir(path.join(GHOSTS_DIR, id))) {
+      await fs.rm(path.join(GHOSTS_DIR, id, f), { force: true });
+    }
+  } catch {
+    // no ghosts for this song
+  }
   return true;
 }
 
