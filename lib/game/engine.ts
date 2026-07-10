@@ -1551,6 +1551,9 @@ export class Engine {
   private drawNotes(g: CanvasRenderingContext2D, t: number, prog: number): void {
     const tJudge = t - this.effOffset();
     const approach = this.approachAt(Math.max(0, t));
+    // Tiles pulse to the beat: sharp swell on each beat, decaying after.
+    const beatPhase = 1 - (((Math.max(0, t) * this.map.bpm) / 60) % 1);
+    const pulse = beatPhase * beatPhase;
 
     g.save();
     for (const n of this.notes) {
@@ -1559,7 +1562,7 @@ export class Engine {
       const hue = laneHue(n.lane, prog);
 
       if (n.kind === 'hold') {
-        this.drawHold(g, n, d, approach, hue, tJudge);
+        this.drawHold(g, n, d, approach, hue, tJudge, pulse);
         continue;
       }
       if (d < -0.12) continue;
@@ -1575,7 +1578,7 @@ export class Engine {
 
       // Bonus gem: spinning faceted jewel.
       if (n.kind === 'bonus' && !n.judged) {
-        this.drawGem(g, n.lane, d);
+        this.drawGem(g, n.lane, d, pulse);
         continue;
       }
 
@@ -1599,21 +1602,22 @@ export class Engine {
         prFar,
         missed ? -40 : hue,
         alpha,
-        1,
+        missed ? 1 : 1 + 0.08 * pulse,
         missed,
-        n.kind === 'double'
+        n.kind === 'double',
+        missed ? 0 : pulse
       );
     }
     g.restore();
   }
 
   /** Bonus gem: an iridescent faceted jewel that spins as it approaches. */
-  private drawGem(g: CanvasRenderingContext2D, lane: number, d: number): void {
+  private drawGem(g: CanvasRenderingContext2D, lane: number, d: number, pulse = 0): void {
     const pr = this.proj(d + TILE_LEN / 2);
     const x = this.laneX(lane, pr);
     const y = this.yAt(pr);
     const now = performance.now();
-    const s = this.laneW * 0.34 * pr;
+    const s = this.laneW * 0.34 * pr * (1 + 0.09 * pulse);
     if (s < 2) return;
     // fake Y-axis spin by squashing horizontally
     const spin = 0.45 + 0.55 * Math.abs(Math.cos(now / 350 + lane * 2));
@@ -1625,7 +1629,7 @@ export class Engine {
     g.save();
     g.globalCompositeOperation = 'lighter';
     const halo = g.createRadialGradient(x, y, s * 0.2, x, y, s * 2.2);
-    halo.addColorStop(0, `hsla(${hue}, 100%, 75%, ${0.5 + 0.2 * Math.sin(now / 120)})`);
+    halo.addColorStop(0, `hsla(${hue}, 100%, 75%, ${0.4 + 0.35 * pulse})`);
     halo.addColorStop(1, 'hsla(0,0%,0%,0)');
     g.fillStyle = halo;
     g.fillRect(x - s * 2.2, y - s * 2.2, s * 4.4, s * 4.4);
@@ -1690,7 +1694,8 @@ export class Engine {
     dHead: number,
     approach: number,
     hue: number,
-    tJudge: number
+    tJudge: number,
+    pulse = 0
   ): void {
     const dur = n.dur ?? 0.5;
     const dTail = (n.t + dur - tJudge) / approach;
@@ -1746,8 +1751,10 @@ export class Engine {
       this.proj(Math.max(dH, -0.1) + TILE_LEN * 0.8),
       hue,
       alpha,
-      riding ? 1 + 0.05 * Math.sin(now / 40) : 1,
-      n.judged === 'miss'
+      riding ? 1 + 0.05 * Math.sin(now / 40) : 1 + 0.07 * pulse,
+      n.judged === 'miss',
+      false,
+      n.judged === 'miss' ? 0 : pulse
     );
 
     // Sparks while riding.
@@ -1775,7 +1782,8 @@ export class Engine {
     alpha: number,
     scale = 1,
     missed = false,
-    split = false
+    split = false,
+    pulse = 0
   ): void {
     const yN = this.yAt(prNear);
     const yF = this.yAt(prFar);
@@ -1792,7 +1800,7 @@ export class Engine {
     const glowR = halfN * 1.7;
     if (glowR > 1) {
       const glow = g.createRadialGradient(cxN, (yN + yF) / 2, glowR * 0.15, cxN, (yN + yF) / 2, glowR);
-      glow.addColorStop(0, `hsla(${hue}, 100%, 65%, ${0.5 * alpha})`);
+      glow.addColorStop(0, `hsla(${hue}, 100%, 65%, ${(0.5 + 0.3 * pulse) * alpha})`);
       glow.addColorStop(1, 'hsla(0,0%,0%,0)');
       g.fillStyle = glow;
       g.fillRect(cxN - glowR, (yN + yF) / 2 - glowR, glowR * 2, glowR * 2);
@@ -1806,9 +1814,9 @@ export class Engine {
       grad.addColorStop(0, 'hsla(350, 90%, 45%, 0.9)');
       grad.addColorStop(1, 'hsla(350, 95%, 60%, 0.95)');
     } else {
-      grad.addColorStop(0, `hsla(${hue}, 95%, 46%, 0.95)`);
-      grad.addColorStop(0.55, `hsla(${hue}, 100%, 62%, 0.97)`);
-      grad.addColorStop(1, `hsla(${hue - 25}, 100%, 82%, 1)`);
+      grad.addColorStop(0, `hsla(${hue}, 95%, ${46 + pulse * 8}%, 0.95)`);
+      grad.addColorStop(0.55, `hsla(${hue}, 100%, ${62 + pulse * 10}%, 0.97)`);
+      grad.addColorStop(1, `hsla(${hue - 25}, 100%, ${82 + pulse * 8}%, 1)`);
     }
     g.fillStyle = grad;
     g.beginPath();
