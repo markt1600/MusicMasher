@@ -1639,10 +1639,6 @@ export class Engine {
     // Tiles pulse to the beat: sharp swell on each beat, decaying after.
     const beatPhase = 1 - (((Math.max(0, t) * this.map.bpm) / 60) % 1);
     const pulse = beatPhase * beatPhase;
-    // Vertical bob: hop height rides the beat and the song's loudness.
-    const env = this.envAt(Math.max(0, t));
-    const bobAmp = (0.35 + 0.65 * env) * pulse;
-    const now = performance.now();
 
     g.save();
     for (const n of this.notes) {
@@ -1684,16 +1680,6 @@ export class Engine {
       const prFar = this.proj(d + TILE_LEN);
       const alpha = missed ? Math.max(0, 0.7 - (performance.now() - n.judgedAt) / 280) : 1;
       if (alpha <= 0) continue;
-      // Hop on the beat plus a faint idle float, staggered per tile; the
-      // glow stays on the road so the timing anchor never moves.
-      const lift = missed
-        ? 0
-        : this.laneW *
-          prNear *
-          (0.3 * bobAmp +
-            0.08 *
-              (0.4 + 0.6 * env) *
-              Math.sin(((Math.max(0, t) * this.map.bpm) / 60) * Math.PI + n.t * 4));
       this.drawTile(
         g,
         n.lane,
@@ -1704,8 +1690,7 @@ export class Engine {
         missed ? 1 : 1 + 0.08 * pulse,
         missed,
         n.kind === 'double',
-        missed ? 0 : pulse,
-        lift
+        missed ? 0 : pulse
       );
     }
     g.restore();
