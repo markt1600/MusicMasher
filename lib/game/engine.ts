@@ -1293,11 +1293,13 @@ export class Engine {
     // Base hue is set by the theme and drifts as the song intensifies.
     const hue = THEME_BASE_HUE[this.theme] + prog * 110;
 
+    const beatPhase = 1 - (((Math.max(0, t) * this.map.bpm) / 60) % 1);
+    const pulse = beatPhase * beatPhase;
     this.drawBackground(g, t, hue, env);
     this.drawSkyEvents(g);
-    this.drawRoad(g, t, hue, env, prog);
+    this.drawRoad(g, t, hue, env, prog, pulse);
     this.drawNotes(g, t, prog);
-    this.drawHitLine(g, hue, prog, now);
+    this.drawHitLine(g, hue, prog, now, pulse);
     this.drawEffects(g, now);
     this.drawComboPulse(g, t, env, hue);
     this.drawHUD(g, t, prog, now, hue);
@@ -1477,7 +1479,8 @@ export class Engine {
     t: number,
     hue: number,
     env: number,
-    prog: number
+    prog: number,
+    pulse = 0
   ): void {
     const { cx, horizonY, hitY, roadHalf, h } = this;
     const bottomProj = this.proj(-0.1); // road extends past the hit line
@@ -1486,10 +1489,11 @@ export class Engine {
 
     // Road body: dark glassy wedge to the vanishing point.
     g.save();
+    // The road surface itself breathes color on the beat.
     const roadGrad = g.createLinearGradient(0, horizonY, 0, h);
-    roadGrad.addColorStop(0, `hsla(${hue}, 70%, 30%, 0.10)`);
-    roadGrad.addColorStop(0.6, `hsla(${hue + 20}, 55%, 12%, 0.55)`);
-    roadGrad.addColorStop(1, `hsla(${hue + 20}, 55%, 8%, 0.8)`);
+    roadGrad.addColorStop(0, `hsla(${hue + pulse * 24}, 75%, ${30 + pulse * 8}%, ${0.1 + pulse * 0.08})`);
+    roadGrad.addColorStop(0.6, `hsla(${hue + 20 + pulse * 14}, 60%, ${12 + pulse * 4}%, 0.55)`);
+    roadGrad.addColorStop(1, `hsla(${hue + 20}, 55%, ${8 + pulse * 3}%, 0.8)`);
     g.fillStyle = roadGrad;
     g.beginPath();
     g.moveTo(cx, horizonY);
@@ -1498,15 +1502,16 @@ export class Engine {
     g.closePath();
     g.fill();
 
-    // Horizontal beat grid rushing toward the player.
+    // Horizontal beat grid rushing toward the player, hues drifting subtly
+    // so color seems to flow through the chart.
     const speed = 0.55; // d-units per second equivalent
-    g.strokeStyle = `hsla(${hue}, 90%, 60%, 0.5)`;
     for (let k = 0; k < 12; k++) {
       const dLine = ((k * 0.14 - t * speed * 0.14) % 1.68 + 1.68) % 1.68 - 0.1;
       if (dLine < -0.1 || dLine > 1.4) continue;
       const pr = this.proj(dLine);
       const y = this.yAt(pr);
       const half = roadHalf * pr;
+      g.strokeStyle = `hsla(${hue + Math.sin(k * 1.7 + t * 1.2) * 26}, 90%, ${60 + pulse * 10}%, 0.5)`;
       g.globalAlpha = Math.min(0.5, pr * 0.55) * (0.5 + env * 0.5);
       g.lineWidth = Math.max(1, 1.6 * pr * this.dpr);
       g.beginPath();
@@ -1525,6 +1530,26 @@ export class Engine {
       g.moveTo(cx, horizonY);
       g.lineTo(cx + off * bottomProj, bottomY);
       g.stroke();
+    }
+
+    // Energy sweeps racing down the dividers toward the player, one per beat.
+    if (t >= 0) {
+      const sweepD = 1 - (((t * this.map.bpm) / 60) % 1); // horizon → hit line each beat
+      const spr = this.proj(sweepD);
+      const sy = this.yAt(spr);
+      g.save();
+      g.globalCompositeOperation = 'lighter';
+      for (let lane = 0; lane <= LANES; lane++) {
+        const off = (lane - LANES / 2) * this.laneW;
+        const sx = cx + off * spr;
+        const r = Math.max(2, (3 + env * 4) * spr * this.dpr * 2.2);
+        const dot = g.createRadialGradient(sx, sy, 0, sx, sy, r);
+        dot.addColorStop(0, `hsla(${hue + 30}, 100%, 80%, ${(0.35 + 0.45 * env) * spr})`);
+        dot.addColorStop(1, 'hsla(0,0%,0%,0)');
+        g.fillStyle = dot;
+        g.fillRect(sx - r, sy - r, r * 2, r * 2);
+      }
+      g.restore();
     }
 
     // Glowing road edges (brighter with the beat and as the song ramps up).
@@ -1871,7 +1896,8 @@ export class Engine {
     g: CanvasRenderingContext2D,
     hue: number,
     prog: number,
-    now: number
+    now: number,
+    pulse = 0
   ): void {
     const { cx, hitY, roadHalf, laneW } = this;
 
@@ -1880,10 +1906,10 @@ export class Engine {
     g.globalCompositeOperation = 'lighter';
     const barGrad = g.createLinearGradient(cx - roadHalf, 0, cx + roadHalf, 0);
     barGrad.addColorStop(0, 'hsla(0,0%,100%,0)');
-    barGrad.addColorStop(0.5, `hsla(${hue}, 100%, 75%, 0.75)`);
+    barGrad.addColorStop(0.5, `hsla(${hue + pulse * 30}, 100%, ${75 + pulse * 12}%, ${0.6 + pulse * 0.35})`);
     barGrad.addColorStop(1, 'hsla(0,0%,100%,0)');
     g.strokeStyle = barGrad;
-    g.lineWidth = 2.5 * this.dpr;
+    g.lineWidth = (2.5 + pulse * 1.8) * this.dpr;
     g.beginPath();
     g.moveTo(cx - roadHalf * 1.02, hitY);
     g.lineTo(cx + roadHalf * 1.02, hitY);
