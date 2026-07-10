@@ -1579,6 +1579,10 @@ export class Engine {
     // Tiles pulse to the beat: sharp swell on each beat, decaying after.
     const beatPhase = 1 - (((Math.max(0, t) * this.map.bpm) / 60) % 1);
     const pulse = beatPhase * beatPhase;
+    // Vertical bob: hop height rides the beat and the song's loudness.
+    const env = this.envAt(Math.max(0, t));
+    const bobAmp = (0.35 + 0.65 * env) * pulse;
+    const now = performance.now();
 
     g.save();
     for (const n of this.notes) {
@@ -1620,6 +1624,13 @@ export class Engine {
       const prFar = this.proj(d + TILE_LEN);
       const alpha = missed ? Math.max(0, 0.7 - (performance.now() - n.judgedAt) / 280) : 1;
       if (alpha <= 0) continue;
+      // Hop on the beat plus a faint idle float, staggered per tile; the
+      // glow stays on the road so the timing anchor never moves.
+      const lift = missed
+        ? 0
+        : this.laneW *
+          prNear *
+          (0.14 * bobAmp + 0.03 * Math.sin(now / 320 + n.t * 6));
       this.drawTile(
         g,
         n.lane,
@@ -1630,7 +1641,8 @@ export class Engine {
         missed ? 1 : 1 + 0.08 * pulse,
         missed,
         n.kind === 'double',
-        missed ? 0 : pulse
+        missed ? 0 : pulse,
+        lift
       );
     }
     g.restore();
@@ -1808,7 +1820,8 @@ export class Engine {
     scale = 1,
     missed = false,
     split = false,
-    pulse = 0
+    pulse = 0,
+    lift = 0
   ): void {
     const yN = this.yAt(prNear);
     const yF = this.yAt(prFar);
@@ -1833,8 +1846,11 @@ export class Engine {
     g.restore();
     g.globalAlpha = alpha;
 
-    // Tile body (trapezoid in perspective)
-    const grad = g.createLinearGradient(0, yF, 0, yN);
+    // Tile body (trapezoid in perspective), hovering `lift` px above its
+    // road position while the under-glow stays anchored.
+    const yNb = yN - lift;
+    const yFb = yF - lift;
+    const grad = g.createLinearGradient(0, yFb, 0, yNb);
     if (missed) {
       grad.addColorStop(0, 'hsla(350, 90%, 45%, 0.9)');
       grad.addColorStop(1, 'hsla(350, 95%, 60%, 0.95)');
@@ -1845,10 +1861,10 @@ export class Engine {
     }
     g.fillStyle = grad;
     g.beginPath();
-    g.moveTo(cxF - halfF, yF);
-    g.lineTo(cxF + halfF, yF);
-    g.lineTo(cxN + halfN, yN);
-    g.lineTo(cxN - halfN, yN);
+    g.moveTo(cxF - halfF, yFb);
+    g.lineTo(cxF + halfF, yFb);
+    g.lineTo(cxN + halfN, yNb);
+    g.lineTo(cxN - halfN, yNb);
     g.closePath();
     g.fill();
     g.strokeStyle = missed
@@ -1862,10 +1878,10 @@ export class Engine {
       g.globalAlpha = alpha * 0.5;
       g.fillStyle = `hsla(${hue - 40}, 100%, 90%, 0.8)`;
       g.beginPath();
-      g.moveTo(cxF - halfF * 0.55, yF + (yN - yF) * 0.15);
-      g.lineTo(cxF - halfF * 0.2, yF + (yN - yF) * 0.15);
-      g.lineTo(cxN - halfN * 0.2, yN - (yN - yF) * 0.12);
-      g.lineTo(cxN - halfN * 0.55, yN - (yN - yF) * 0.12);
+      g.moveTo(cxF - halfF * 0.55, yFb + (yNb - yFb) * 0.15);
+      g.lineTo(cxF - halfF * 0.2, yFb + (yNb - yFb) * 0.15);
+      g.lineTo(cxN - halfN * 0.2, yNb - (yNb - yFb) * 0.12);
+      g.lineTo(cxN - halfN * 0.55, yNb - (yNb - yFb) * 0.12);
       g.closePath();
       g.fill();
     }
@@ -1873,7 +1889,7 @@ export class Engine {
     // Double-tap tile: split into two segments so it reads "tap twice".
     if (split && halfN > 4) {
       const seg = (fr: number) => ({
-        y: yF + (yN - yF) * fr,
+        y: yFb + (yNb - yFb) * fr,
         cx: cxF + (cxN - cxF) * fr,
         half: halfF + (halfN - halfF) * fr,
       });
