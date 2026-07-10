@@ -1565,6 +1565,66 @@ export class Engine {
     }
     g.restore();
 
+    // Marquee lights chasing down both road edges (double-time with beat).
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    const chase = (t * this.map.bpm) / 60 / 2; // one cycle per two beats
+    for (let k = 0; k < 7; k++) {
+      const frac = ((k / 7 + chase) % 1 + 1) % 1;
+      const dDash = 1.2 - frac * 1.3;
+      if (dDash < -0.08) continue;
+      const prD = this.proj(dDash);
+      const yD = this.yAt(prD);
+      const rD = Math.max(1.5, (2.5 + env * 2.5) * prD * this.dpr * 2);
+      for (const side of [-1, 1]) {
+        const xD = cx + side * roadHalf * prD;
+        const dash = g.createRadialGradient(xD, yD, 0, xD, yD, rD);
+        dash.addColorStop(0, `hsla(${hue + 20}, 100%, 75%, ${(0.3 + 0.4 * pulse) * prD})`);
+        dash.addColorStop(1, 'hsla(0,0%,0%,0)');
+        g.fillStyle = dash;
+        g.fillRect(xD - rD, yD - rD, rD * 2, rD * 2);
+      }
+    }
+
+    // Glowing motes drifting up off the road surface, denser when loud.
+    for (let i = 0; i < 10; i++) {
+      const drift = ((i * 0.173 + t * (0.06 + (i % 3) * 0.02)) % 1.3 + 1.3) % 1.3 - 0.05;
+      if (drift < -0.05) continue;
+      const prM = this.proj(drift);
+      const xFrac = Math.sin(i * 12.9898) * 0.85;
+      const xM = cx + xFrac * roadHalf * prM;
+      const rise = (8 + (i % 4) * 7 + Math.sin(t * 1.3 + i * 2) * 5) * this.dpr * prM;
+      const yM = this.yAt(prM) - rise;
+      g.globalAlpha = Math.min(0.5, prM * 0.6) * (0.25 + env * 0.55);
+      g.fillStyle = `hsl(${hue + i * 9}, 100%, 72%)`;
+      g.beginPath();
+      g.arc(xM, yM, Math.max(0.8, 1.6 * prM * this.dpr * 1.6), 0, Math.PI * 2);
+      g.fill();
+    }
+    g.globalAlpha = 1;
+
+    // A soft shimmer band sweeping down the road every two bars.
+    {
+      const sweep = 1.2 - ((((t * this.map.bpm) / 60 / 8) % 1 + 1) % 1) * 1.4;
+      const prA = this.proj(sweep);
+      const prB = this.proj(sweep + 0.16);
+      if (sweep > -0.2) {
+        const yA = this.yAt(prA);
+        const yB = this.yAt(prB);
+        g.globalAlpha = 0.05 + 0.07 * env;
+        g.fillStyle = `hsl(${hue + 40}, 100%, 70%)`;
+        g.beginPath();
+        g.moveTo(cx - roadHalf * prB, yB);
+        g.lineTo(cx + roadHalf * prB, yB);
+        g.lineTo(cx + roadHalf * prA, yA);
+        g.lineTo(cx - roadHalf * prA, yA);
+        g.closePath();
+        g.fill();
+        g.globalAlpha = 1;
+      }
+    }
+    g.restore();
+
     // Vignette bottom so tiles pop.
     const vig = g.createLinearGradient(0, hitY, 0, h);
     vig.addColorStop(0, 'rgba(0,0,0,0)');
@@ -1630,7 +1690,10 @@ export class Engine {
         ? 0
         : this.laneW *
           prNear *
-          (0.14 * bobAmp + 0.03 * Math.sin(now / 320 + n.t * 6));
+          (0.3 * bobAmp +
+            0.08 *
+              (0.4 + 0.6 * env) *
+              Math.sin(((Math.max(0, t) * this.map.bpm) / 60) * Math.PI + n.t * 4));
       this.drawTile(
         g,
         n.lane,
