@@ -67,6 +67,18 @@ Built for mobile touch screens first, with full desktop keyboard support.
   loudness envelope, and a color palette that drifts from teal to pink as the
   song intensifies. The AudioContext clock drives everything, so visuals and
   judging can't drift from the music.
+- **Audio-reactive world** — a live FFT drives the scene in real time: the
+  horizon flares on kick drums, spectrum bars ripple along the road edges,
+  the sun jumps with the bass, and stars and city windows sparkle with the
+  treble. Outside gauntlet runs the whole stage is tinted with the dominant
+  colors of the song's album art, so every song owns its own palette.
+- **Hit juice** — perfects shatter tiles into spinning shards and fire a
+  light beam down the lane, doubles and gems kick the screen with a shake
+  and color flash, energy pulses stream down hold tails while you ride them,
+  misses pulse the screen edges red, and at high combo tiles streak with
+  motion trails. A wet-road reflection below the hit line mirrors the action,
+  and the frame breathes with the beat. Results roll in with a score count-up
+  and confetti.
 - **Demo track** — "Neon Dreams" is synthesized in the browser with an
   OfflineAudioContext, so the game is playable before anyone uploads a song
   (and no audio files ship in the repo).

@@ -86,6 +86,20 @@ interface Particle {
   hue: number;
 }
 
+/** A spinning fragment of a shattered tile (perfect hits). */
+interface Shard {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  rot: number;
+  vr: number;
+  life: number;
+  maxLife: number;
+  size: number;
+  hue: number;
+}
+
 interface Ring {
   lane: number;
   born: number;
@@ -162,6 +176,9 @@ export interface EngineOptions {
   /** Author punch-in: previous take, shown as translucent reference tiles
    * until the first new tap takes over. */
   referenceNotes?: Note[];
+  /** Dominant hues (degrees) from the song's album art; when present they
+   * tint the sky, road and scenery so each song gets its own palette. */
+  artHues?: number[];
 }
 
 export interface EngineCallbacks {
@@ -257,6 +274,21 @@ export class Engine {
   private rings: Ring[] = [];
   private texts: FloatText[] = [];
   private pressUntil = new Float64Array(LANES);
+  private shards: Shard[] = [];
+  private beams: { lane: number; born: number; hue: number; strong: boolean }[] = [];
+  private shakeUntil = 0;
+  private shakeAmp = 0;
+  private flashUntil = 0;
+  private flashHue = 0;
+
+  // live audio analysis — smoothed band energies drive reactive visuals
+  private analyser: AnalyserNode | null = null;
+  private freqData: Uint8Array<ArrayBuffer> | null = null;
+  private bass = 0;
+  private bassAvg = 0;
+  private kick = 0; // bass transient, fast attack / exponential decay
+  private mids = 0;
+  private highs = 0;
 
   private skyEvents: SkyEvent[] = [];
 
@@ -303,6 +335,7 @@ export class Engine {
   private referenceNotes: Note[] = [];
   private takeoverT: number | null = null;
   private takeoverAtMs = 0;
+  private artHues: number[] | null = null;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -330,6 +363,7 @@ export class Engine {
     this.startOffset = Math.max(0, opts.startAt ?? 0);
     this.armAt = Math.max(this.startOffset, opts.armAt ?? 0);
     this.referenceNotes = [...(opts.referenceNotes ?? [])].sort((a, b) => a.t - b.t);
+    this.artHues = opts.artHues && opts.artHues.length > 0 ? opts.artHues : null;
     this.notes = [...map.notes]
       .sort((a, b) => a.t - b.t)
       .map((n) => ({
@@ -362,7 +396,18 @@ export class Engine {
   start(): void {
     const src = this.audioCtx.createBufferSource();
     src.buffer = this.buffer;
-    src.connect(this.audioCtx.destination);
+    // Route through an analyser so visuals can react to the live spectrum.
+    try {
+      const an = this.audioCtx.createAnalyser();
+      an.fftSize = 256;
+      an.smoothingTimeConstant = 0.5;
+      src.connect(an);
+      an.connect(this.audioCtx.destination);
+      this.analyser = an;
+      this.freqData = new Uint8Array(an.frequencyBinCount);
+    } catch {
+      src.connect(this.audioCtx.destination);
+    }
     this.startCtxTime = this.audioCtx.currentTime + LEAD_IN - this.startOffset;
     src.start(this.audioCtx.currentTime + LEAD_IN, this.startOffset);
     this.source = src;
@@ -370,6 +415,9 @@ export class Engine {
     // and visuals automatically; the manual offset stays for fine-tuning.
     const out = this.audioCtx.outputLatency ?? 0;
     this.autoLatency = Math.min(0.25, Math.max(0, out));
+    // Debug/testing hook: performance.now() timestamp of song time zero.
+    (window as unknown as Record<string, unknown>).__mmT0 =
+      performance.now() + (LEAD_IN - this.startOffset) * 1000;
     this.loop();
   }
 
@@ -396,6 +444,7 @@ export class Engine {
       // already stopped
     }
     this.source?.disconnect();
+    this.analyser?.disconnect();
     this.resizeObserver?.disconnect();
     this.canvas.removeEventListener('pointerdown', this.onPointerDown);
     window.removeEventListener('pointerup', this.onPointerUp);
@@ -406,6 +455,30 @@ export class Engine {
 
   private songTime(): number {
     return this.audioCtx.currentTime - this.startCtxTime;
+  }
+
+  /** Sample the live spectrum once per frame into smoothed band energies.
+   * `kick` isolates bass transients: fast attack, exponential decay. */
+  private sampleAudio(): void {
+    const an = this.analyser;
+    const f = this.freqData;
+    if (!an || !f) return;
+    an.getByteFrequencyData(f);
+    const n = f.length;
+    const band = (from: number, to: number) => {
+      const i0 = Math.max(0, Math.floor(n * from));
+      const i1 = Math.max(i0 + 1, Math.floor(n * to));
+      let s = 0;
+      for (let i = i0; i < i1; i++) s += f[i];
+      return s / ((i1 - i0) * 255);
+    };
+    const bassNow = band(0.01, 0.08);
+    this.bass += (bassNow - this.bass) * (bassNow > this.bass ? 0.55 : 0.14);
+    this.mids += (band(0.08, 0.4) - this.mids) * 0.3;
+    this.highs += (band(0.4, 0.85) - this.highs) * 0.35;
+    this.bassAvg += (bassNow - this.bassAvg) * 0.03;
+    const kickNow = Math.max(0, Math.min(1, (bassNow - this.bassAvg) * 4));
+    this.kick = Math.max(kickNow, this.kick * 0.88);
   }
 
   private stats(): GameStats {
@@ -657,6 +730,28 @@ export class Engine {
       const mult = 1 + Math.min(this.combo, 100) / 100;
       this.score += SCORE_VALUE[j] * mult;
       this.spawnHitEffects(note.lane, j);
+      if (j === 'perfect') {
+        this.spawnShards(note.lane);
+        this.beams.push({
+          lane: note.lane,
+          born: note.judgedAt,
+          hue: LANE_HUES[note.lane],
+          strong: false,
+        });
+      }
+      // Doubles and gems land with a screen kick: shake + color flash + beam.
+      if (note.kind === 'double' || note.kind === 'bonus') {
+        this.shakeUntil = note.judgedAt + 220;
+        this.shakeAmp = (note.kind === 'bonus' ? 5 : 3.5) * this.dpr;
+        this.flashUntil = note.judgedAt + (note.kind === 'bonus' ? 260 : 180);
+        this.flashHue = note.kind === 'bonus' ? 48 : LANE_HUES[note.lane];
+        this.beams.push({
+          lane: note.lane,
+          born: note.judgedAt,
+          hue: LANE_HUES[note.lane],
+          strong: true,
+        });
+      }
       if (j === 'perfect') buzz(16);
       else if (j === 'great') buzz(9);
       if (note.kind === 'bonus') {
@@ -815,6 +910,29 @@ export class Engine {
         maxLife: 600 + Math.random() * 400,
         size: (2 + Math.random() * 4) * this.dpr,
         hue: LANE_HUES[i % 3] + Math.random() * 20,
+      });
+    }
+  }
+
+  /** Perfect hits shatter the tile into spinning colored fragments. */
+  private spawnShards(lane: number): void {
+    if (this.shards.length > 80) return;
+    const x = this.laneX(lane, 1);
+    const hue = LANE_HUES[lane];
+    for (let i = 0; i < 8; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = (0.9 + Math.random() * 1.6) * this.w * 0.004;
+      this.shards.push({
+        x: x + (Math.random() - 0.5) * this.laneW * 0.6,
+        y: this.hitY + (Math.random() - 0.5) * this.laneW * 0.14,
+        vx: Math.cos(a) * sp,
+        vy: -Math.abs(Math.sin(a)) * sp - this.w * 0.0022,
+        rot: Math.random() * Math.PI,
+        vr: (Math.random() - 0.5) * 0.32,
+        life: 0,
+        maxLife: 420 + Math.random() * 320,
+        size: (3.5 + Math.random() * 5) * this.dpr,
+        hue: hue + Math.random() * 24 - 12,
       });
     }
   }
@@ -990,23 +1108,37 @@ export class Engine {
     if (!this.ended) this.raf = requestAnimationFrame(this.loop);
   };
 
+  /** Advance particles, shards, rings, texts, beams (shared by both modes). */
+  private updateEffects(now: number): void {
+    const grav = this.h * 0.00012;
+    for (let i = this.particles.length - 1; i >= 0; i--) {
+      const p = this.particles[i];
+      p.life += 16.7;
+      p.x += p.vx;
+      p.y += p.vy;
+      p.vy += grav;
+      if (p.life >= p.maxLife) this.particles.splice(i, 1);
+    }
+    for (let i = this.shards.length - 1; i >= 0; i--) {
+      const s = this.shards[i];
+      s.life += 16.7;
+      s.x += s.vx;
+      s.y += s.vy;
+      s.vy += grav * 1.6;
+      s.rot += s.vr;
+      if (s.life >= s.maxLife) this.shards.splice(i, 1);
+    }
+    this.rings = this.rings.filter((r) => now - r.born < 450);
+    this.texts = this.texts.filter((tx) => now - tx.born < 700);
+    this.beams = this.beams.filter((b) => now - b.born < 260);
+  }
+
   private update(): void {
     const t = this.songTime() - this.effOffset();
 
     // Chart studio: no judging/survival/ghosts — just effects and the end.
     if (this.author) {
-      const grav0 = this.h * 0.00012;
-      for (let i = this.particles.length - 1; i >= 0; i--) {
-        const p = this.particles[i];
-        p.life += 16.7;
-        p.x += p.vx;
-        p.y += p.vy;
-        p.vy += grav0;
-        if (p.life >= p.maxLife) this.particles.splice(i, 1);
-      }
-      const nowA = performance.now();
-      this.rings = this.rings.filter((r) => nowA - r.born < 450);
-      this.texts = this.texts.filter((tx) => nowA - tx.born < 700);
+      this.updateEffects(performance.now());
       if (!this.ended && this.songTime() > this.map.duration + 0.6) {
         this.ended = true;
         cancelAnimationFrame(this.raf);
@@ -1066,19 +1198,8 @@ export class Engine {
     this.shownScore += (this.score - this.shownScore) * 0.14;
     if (Math.abs(this.score - this.shownScore) < 1) this.shownScore = this.score;
 
-    // Particles.
-    const grav = this.h * 0.00012;
-    for (let i = this.particles.length - 1; i >= 0; i--) {
-      const p = this.particles[i];
-      p.life += 16.7;
-      p.x += p.vx;
-      p.y += p.vy;
-      p.vy += grav;
-      if (p.life >= p.maxLife) this.particles.splice(i, 1);
-    }
     const now = performance.now();
-    this.rings = this.rings.filter((r) => now - r.born < 450);
-    this.texts = this.texts.filter((tx) => now - tx.born < 700);
+    this.updateEffects(now);
     this.popups = this.popups.filter((p) => now - p.born < 1300);
 
     // Sky spectacle: past 20 combo the sky comes alive, more so as it climbs.
@@ -1443,25 +1564,156 @@ export class Engine {
 
   private render(): void {
     const g = this.g;
+    this.sampleAudio();
     const t = this.songTime();
     const prog = Math.min(1, Math.max(0, t / this.map.duration));
     const env = this.envAt(t);
     const now = performance.now();
-    // Base hue is set by the theme and drifts as the song intensifies.
-    const hue = THEME_BASE_HUE[this.theme] + prog * 110;
+    // Base hue comes from the album art when we have it, else the theme,
+    // and drifts as the song intensifies.
+    const baseHue = this.artHues ? this.artHues[0] : THEME_BASE_HUE[this.theme];
+    const hue = baseHue + prog * 110;
 
     const beatPhase = 1 - (((Math.max(0, t) * this.map.bpm) / 60) % 1);
     const pulse = beatPhase * beatPhase;
+
+    // Screen shake on doubles/gems — the whole world jolts, the HUD stays put.
+    const shake =
+      now < this.shakeUntil ? this.shakeAmp * ((this.shakeUntil - now) / 220) : 0;
+    g.save();
+    if (shake > 0) {
+      g.translate((Math.random() - 0.5) * 2 * shake, (Math.random() - 0.5) * 2 * shake);
+    }
     this.drawBackground(g, t, hue, env);
     this.drawSkyEvents(g);
     this.drawRoad(g, t, hue, env, prog, pulse);
+    this.drawSpectrum(g, hue);
     this.drawNotes(g, t, prog);
     if (this.author) this.drawReferenceNotes(g, t, prog);
+    this.drawBeams(g, now);
+    this.drawReflection(g);
     this.drawHitLine(g, hue, prog, now, pulse);
     this.drawEffects(g, now);
     this.drawComboPulse(g, t, env, hue);
+    g.restore();
+    this.drawFrameFX(g, now, pulse, hue);
     if (this.author) this.drawAuthorHUD(g, t, prog, now, hue);
     else this.drawHUD(g, t, prog, now, hue);
+  }
+
+  /** Live equalizer: spectrum bars fanning out from both road edges. */
+  private drawSpectrum(g: CanvasRenderingContext2D, hue: number): void {
+    const f = this.freqData;
+    if (!f) return;
+    const N = 22;
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < N; i++) {
+      const d = 0.02 + (i / N) * 1.1; // near edge = low bins, horizon = high
+      const pr = this.proj(d);
+      const v = f[1 + Math.floor((i / N) * f.length * 0.7)] / 255;
+      if (v <= 0.03) continue;
+      const y = this.yAt(pr);
+      const len = v * v * this.laneW * 1.5 * pr;
+      g.strokeStyle = `hsla(${hue + 40 + v * 60}, 100%, ${58 + v * 25}%, ${
+        0.85 * pr * (0.35 + v)
+      })`;
+      g.lineWidth = Math.max(1, 3 * pr * this.dpr);
+      for (const side of [-1, 1]) {
+        const x0 = this.cx + side * this.roadHalf * pr;
+        g.beginPath();
+        g.moveTo(x0, y);
+        g.lineTo(x0 + side * len, y);
+        g.stroke();
+      }
+    }
+    g.restore();
+  }
+
+  /** Lane beams: a column of light from the pad to the vanishing point,
+   * fired on perfects (stronger for doubles and gems). */
+  private drawBeams(g: CanvasRenderingContext2D, now: number): void {
+    if (this.beams.length === 0) return;
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    for (const b of this.beams) {
+      const age = (now - b.born) / 260;
+      if (age >= 1) continue;
+      const a = (1 - age) * (b.strong ? 0.5 : 0.28);
+      const half = this.laneW * (b.strong ? 0.34 : 0.2) * (1 - age * 0.4);
+      const xN = this.laneX(b.lane, 1);
+      const grad = g.createLinearGradient(0, this.horizonY, 0, this.hitY);
+      grad.addColorStop(0, `hsla(${b.hue}, 100%, 78%, 0)`);
+      grad.addColorStop(0.4, `hsla(${b.hue}, 100%, 72%, ${a * 0.5})`);
+      grad.addColorStop(1, `hsla(${b.hue}, 100%, 82%, ${a})`);
+      g.fillStyle = grad;
+      g.beginPath();
+      g.moveTo(this.cx, this.horizonY);
+      g.lineTo(xN - half, this.hitY);
+      g.lineTo(xN + half, this.hitY);
+      g.closePath();
+      g.fill();
+    }
+    g.restore();
+  }
+
+  /** Wet-road reflection: mirror the strip above the hit line below it,
+   * fading with distance — sells the road as a glossy surface. */
+  private drawReflection(g: CanvasRenderingContext2D): void {
+    const { w, h, hitY } = this;
+    const stripH = Math.min(h - hitY, Math.round(h * 0.17));
+    if (stripH < 8) return;
+    g.save();
+    g.globalAlpha = 0.24;
+    g.translate(0, hitY * 2);
+    g.scale(1, -1);
+    g.drawImage(this.canvas, 0, hitY - stripH, w, stripH, 0, hitY - stripH, w, stripH);
+    g.restore();
+    const fade = g.createLinearGradient(0, hitY, 0, hitY + stripH);
+    fade.addColorStop(0, 'rgba(4, 6, 20, 0.1)');
+    fade.addColorStop(1, 'rgba(4, 6, 20, 0.85)');
+    g.fillStyle = fade;
+    g.fillRect(0, hitY, w, stripH);
+  }
+
+  /** Full-frame finishers: celebration flash, red miss pulse at the screen
+   * edges, and a vignette that breathes with the beat and the bass. */
+  private drawFrameFX(
+    g: CanvasRenderingContext2D,
+    now: number,
+    pulse: number,
+    hue: number
+  ): void {
+    const { w, h, cx } = this;
+    if (now < this.flashUntil) {
+      const k = (this.flashUntil - now) / 260;
+      g.save();
+      g.globalCompositeOperation = 'lighter';
+      g.fillStyle = `hsla(${this.flashHue}, 100%, 70%, ${0.14 * k})`;
+      g.fillRect(0, 0, w, h);
+      g.restore();
+    }
+    const missAge = now - this.lastMissAt;
+    if (missAge < 450 && !this.author) {
+      const k = 1 - missAge / 450;
+      const vig = g.createRadialGradient(
+        cx, h * 0.5, Math.min(w, h) * 0.36,
+        cx, h * 0.5, Math.max(w, h) * 0.72
+      );
+      vig.addColorStop(0, 'hsla(350, 90%, 45%, 0)');
+      vig.addColorStop(1, `hsla(350, 95%, 45%, ${0.38 * k})`);
+      g.fillStyle = vig;
+      g.fillRect(0, 0, w, h);
+    }
+    const breathe = 0.09 + 0.07 * pulse + 0.1 * this.kick;
+    const bv = g.createRadialGradient(
+      cx, h * 0.55, Math.min(w, h) * 0.52,
+      cx, h * 0.55, Math.max(w, h) * 0.85
+    );
+    bv.addColorStop(0, 'rgba(0,0,0,0)');
+    bv.addColorStop(1, `hsla(${hue + 60}, 60%, 3%, ${breathe})`);
+    g.fillStyle = bv;
+    g.fillRect(0, 0, w, h);
   }
 
   private drawBackground(
@@ -1479,11 +1731,11 @@ export class Engine {
     g.fillStyle = sky;
     g.fillRect(0, 0, w, h);
 
-    // Stars
+    // Stars — twinkle harder when the treble sparkles.
     g.save();
     for (const s of this.stars) {
       const tw = 0.35 + 0.65 * Math.abs(Math.sin(t * 1.7 + s.phase));
-      g.globalAlpha = tw * 0.8;
+      g.globalAlpha = tw * (0.55 + this.highs * 0.65);
       g.fillStyle = '#dff6ff';
       g.beginPath();
       g.arc(s.x, s.y, s.r, 0, Math.PI * 2);
@@ -1494,7 +1746,10 @@ export class Engine {
     // Theme landmark behind the silhouettes.
     if (this.theme === 'synthwave' || this.theme === 'beach') {
       // Sun glow on the horizon, pulsing with the music.
-      const sunR = (this.h * (this.theme === 'beach' ? 0.13 : 0.11)) * (1 + env * 0.16);
+      const sunR =
+        this.h *
+        (this.theme === 'beach' ? 0.13 : 0.11) *
+        (1 + env * 0.16 + this.kick * 0.22); // the sun jumps on the kick drum
       const sun = g.createRadialGradient(cx, horizonY, sunR * 0.1, cx, horizonY, sunR * 2.6);
       const sunHue = this.theme === 'beach' ? 32 : hue;
       sun.addColorStop(0, `hsla(${sunHue}, 100%, 78%, 0.95)`);
@@ -1584,8 +1839,10 @@ export class Engine {
     g.fillStyle = `hsl(${hue + 45}, 40%, 9%)`;
     g.fill(this.mountains[1]);
 
-    // City windows glitter on top of the skyline.
+    // City windows glitter on top of the skyline, strobing with the treble.
     if (this.theme === 'city') {
+      g.save();
+      g.globalAlpha = 0.55 + this.highs * 0.45;
       for (let i = 0; i < this.cityWindows.length; i++) {
         const wd = this.cityWindows[i];
         const flicker = Math.floor(t * 1.5 + i * 7) % 11 !== 0;
@@ -1593,6 +1850,21 @@ export class Engine {
         g.fillStyle = i % 5 === 0 ? 'rgba(255, 214, 140, 0.9)' : 'rgba(255, 235, 190, 0.6)';
         g.fillRect(wd.x, wd.y, 1.6 * this.dpr, 2.2 * this.dpr);
       }
+      g.restore();
+    }
+
+    // Horizon flare on bass hits — the skyline lights up with the kick.
+    if (this.kick > 0.03) {
+      g.save();
+      g.globalCompositeOperation = 'lighter';
+      const fh = this.h * 0.05 * (0.4 + this.kick);
+      const flare = g.createLinearGradient(0, horizonY - fh, 0, horizonY + fh * 0.4);
+      flare.addColorStop(0, 'hsla(0, 0%, 0%, 0)');
+      flare.addColorStop(0.8, `hsla(${hue + 20}, 100%, 70%, ${0.3 * this.kick})`);
+      flare.addColorStop(1, `hsla(${hue + 20}, 100%, 80%, ${0.12 * this.kick})`);
+      g.fillStyle = flare;
+      g.fillRect(0, horizonY - fh, w, fh * 1.4);
+      g.restore();
     }
 
     // Ocean shimmer at the beach horizon.
@@ -1839,6 +2111,11 @@ export class Engine {
       const prFar = this.proj(d + TILE_LEN);
       const alpha = missed ? Math.max(0, 0.7 - (performance.now() - n.judgedAt) / 280) : 1;
       if (alpha <= 0) continue;
+      // High-combo motion trails streaking behind the tile.
+      if (!missed && !n.judged && this.combo >= 25) {
+        const stretch = 2.2 + Math.min(2.4, this.combo / 50);
+        this.drawTrail(g, n.lane, prFar, this.proj(d + TILE_LEN * stretch), hue);
+      }
       this.drawTile(
         g,
         n.lane,
@@ -1852,6 +2129,36 @@ export class Engine {
         missed ? 0 : pulse
       );
     }
+    g.restore();
+  }
+
+  /** Speed streak trailing behind a tile at high combo. */
+  private drawTrail(
+    g: CanvasRenderingContext2D,
+    lane: number,
+    prA: number,
+    prB: number,
+    hue: number
+  ): void {
+    const yA = this.yAt(prA);
+    const yB = this.yAt(prB);
+    const cA = this.laneX(lane, prA);
+    const cB = this.laneX(lane, prB);
+    const hA = this.laneW * 0.36 * prA;
+    const hB = this.laneW * 0.18 * prB;
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    const grad = g.createLinearGradient(0, yB, 0, yA);
+    grad.addColorStop(0, `hsla(${hue}, 100%, 70%, 0)`);
+    grad.addColorStop(1, `hsla(${hue}, 100%, 70%, 0.26)`);
+    g.fillStyle = grad;
+    g.beginPath();
+    g.moveTo(cB - hB, yB);
+    g.lineTo(cB + hB, yB);
+    g.lineTo(cA + hA, yA);
+    g.lineTo(cA - hA, yA);
+    g.closePath();
+    g.fill();
     g.restore();
   }
 
@@ -2058,6 +2365,26 @@ export class Engine {
       false,
       n.judged === 'miss' ? 0 : pulse
     );
+
+    // Energy pulses flowing down the tail into your finger while riding.
+    if (riding) {
+      g.save();
+      g.globalCompositeOperation = 'lighter';
+      const flow = (now / 380) % 1;
+      for (let k = 0; k < 3; k++) {
+        const fr = (flow + k / 3) % 1; // 0 = tail (far) → 1 = head (pad)
+        const pr = prTail + (prHead - prTail) * fr;
+        const yk = this.yAt(pr);
+        const xk = this.laneX(n.lane, pr);
+        const rk = Math.max(2, this.laneW * 0.11 * pr);
+        const dot = g.createRadialGradient(xk, yk, 0, xk, yk, rk * 2);
+        dot.addColorStop(0, `hsla(${hue}, 100%, 85%, ${0.75 * alpha * (0.4 + fr * 0.6)})`);
+        dot.addColorStop(1, 'hsla(0, 0%, 0%, 0)');
+        g.fillStyle = dot;
+        g.fillRect(xk - rk * 2, yk - rk * 2, rk * 4, rk * 4);
+      }
+      g.restore();
+    }
 
     // Sparks while riding.
     if (riding && Math.random() < 0.35) {
@@ -2297,6 +2624,20 @@ export class Engine {
       g.beginPath();
       g.arc(p.x, p.y, p.size * (1 - lifeFrac * 0.5), 0, Math.PI * 2);
       g.fill();
+    }
+
+    // Tile shards: spinning glass fragments from shattered perfects.
+    for (const s of this.shards) {
+      const lf = s.life / s.maxLife;
+      g.globalAlpha = (1 - lf) * 0.95;
+      g.save();
+      g.translate(s.x, s.y);
+      g.rotate(s.rot);
+      g.fillStyle = `hsl(${s.hue}, 95%, ${70 - lf * 22}%)`;
+      g.fillRect(-s.size / 2, -s.size / 4, s.size, s.size / 2);
+      g.fillStyle = `hsla(${s.hue - 30}, 100%, 88%, ${0.8 * (1 - lf)})`;
+      g.fillRect(-s.size / 2, -s.size / 4, s.size, s.size / 6);
+      g.restore();
     }
     g.restore();
 

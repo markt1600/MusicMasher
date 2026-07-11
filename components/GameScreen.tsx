@@ -7,6 +7,7 @@ import { serializeChart, deserializeChart } from '@/lib/chart-io';
 import { decodeAudio } from '@/lib/aiff';
 import { renderShareCard } from '@/lib/share-card';
 import { DEMO_SONG, getDemoSong } from '@/lib/demo-song';
+import { extractArtHues } from '@/lib/art-palette';
 import { Engine } from '@/lib/game/engine';
 import {
   getBest,
@@ -65,6 +66,60 @@ function grade(stats: GameStats): string {
   return 'D';
 }
 
+/** The final score rolls up from 0 with an ease-out over ~1.2 s. */
+function useCountUp(target: number, active: boolean): number {
+  const [value, setValue] = useState(0);
+  useEffect(() => {
+    if (!active) return;
+    setValue(0);
+    const start = performance.now();
+    let raf = 0;
+    const tick = () => {
+      const p = Math.min(1, (performance.now() - start) / 1200);
+      setValue(Math.round(target * (1 - (1 - p) ** 3)));
+      if (p < 1) raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [target, active]);
+  return active ? value : 0;
+}
+
+/** One-shot confetti drop over the results screen. */
+function Confetti() {
+  const bits = useRef<
+    { left: number; delay: number; dur: number; hue: number; drift: number; size: number }[]
+  >(
+    Array.from({ length: 60 }, () => ({
+      left: Math.random() * 100,
+      delay: Math.random() * 0.9,
+      dur: 2 + Math.random() * 1.6,
+      hue: Math.floor(Math.random() * 360),
+      drift: (Math.random() - 0.5) * 140,
+      size: 6 + Math.random() * 7,
+    }))
+  );
+  return (
+    <div className="confetti" aria-hidden>
+      {bits.current.map((b, i) => (
+        <span
+          key={i}
+          className="confetti-bit"
+          style={{
+            left: `${b.left}%`,
+            width: b.size,
+            height: b.size * 0.55,
+            background: `hsl(${b.hue}, 95%, 65%)`,
+            animationDelay: `${b.delay}s`,
+            animationDuration: `${b.dur}s`,
+            ['--drift' as string]: `${b.drift}px`,
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
 export default function GameScreen({
   songId,
   runStage = 0,
@@ -91,6 +146,7 @@ export default function GameScreen({
   const [analyzePct, setAnalyzePct] = useState<number | null>(null);
   const [title, setTitle] = useState('');
   const [artUrl, setArtUrl] = useState<string | null>(null);
+  const artHuesRef = useRef<number[] | null>(null);
   const [errorMsg, setErrorMsg] = useState('');
   const [stats, setStats] = useState<GameStats | null>(null);
   const [offsetMs, setOffsetMs] = useState(0);
@@ -112,6 +168,21 @@ export default function GameScreen({
   const [ghost, setGhost] = useState<{ name: string; score: number; events: number[][] } | null>(null);
   const [shareMsg, setShareMsg] = useState<string | null>(null);
   const replayRef = useRef<number[][] | null>(null);
+  const shownScore = useCountUp(stats?.score ?? 0, phase === 'results' && stats !== null);
+
+  // Pull the cover art's dominant colors so the stage can dress to match
+  // (normal play only — gauntlet stages keep their own theme palettes).
+  useEffect(() => {
+    artHuesRef.current = null;
+    if (!artUrl) return;
+    let alive = true;
+    void extractArtHues(artUrl).then((hues) => {
+      if (alive) artHuesRef.current = hues;
+    });
+    return () => {
+      alive = false;
+    };
+  }, [artUrl]);
 
   // ---------------------------------------------------------------------
   // Load: fetch (or synthesize) audio → decode → analyze beats
@@ -341,6 +412,7 @@ export default function GameScreen({
         difficulty,
         stageLabel: inRun ? `STAGE ${runStage}/5` : '',
         ghost: !inRun && ghost ? { name: ghost.name, events: ghost.events } : undefined,
+        artHues: !inRun ? artHuesRef.current ?? undefined : undefined,
       }
     );
     engine.offsetMs = Number(localStorage.getItem(OFFSET_KEY) ?? 0) || 0;
@@ -609,6 +681,7 @@ export default function GameScreen({
 
       {phase === 'results' && stats && (
         <div className="overlay">
+          {!failed && <Confetti />}
           {inRun && cleared && runStage === 5 && (
             <div className="new-best win-title">🏆 YOU BEAT THE GAUNTLET!</div>
           )}
@@ -633,7 +706,7 @@ export default function GameScreen({
               bestResult?.newBest && <div className="new-best">🏆 NEW BEST!</div>
             ))}
           <div className="grade">{failed ? 'F' : grade(stats)}</div>
-          <div className="result-score">{stats.score.toLocaleString()}</div>
+          <div className="result-score">{shownScore.toLocaleString()}</div>
           {inRun && (
             <p className="subtle best-line run-line">
               ⚔️ Run total: <b>{runTotal.toLocaleString()}</b>
