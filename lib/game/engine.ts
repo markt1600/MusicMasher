@@ -159,6 +159,9 @@ export interface EngineOptions {
   startAt?: number;
   /** Author mode: taps only register from this song time onward. */
   armAt?: number;
+  /** Author punch-in: previous take, shown as translucent reference tiles
+   * until the first new tap takes over. */
+  referenceNotes?: Note[];
 }
 
 export interface EngineCallbacks {
@@ -296,6 +299,9 @@ export class Engine {
   private authorPending = new Float64Array(LANES).fill(-1);
   private startOffset = 0;
   private armAt = 0;
+  private referenceNotes: Note[] = [];
+  private takeoverT: number | null = null;
+  private takeoverAtMs = 0;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -322,6 +328,7 @@ export class Engine {
     this.author = opts.author ?? false;
     this.startOffset = Math.max(0, opts.startAt ?? 0);
     this.armAt = Math.max(this.startOffset, opts.armAt ?? 0);
+    this.referenceNotes = [...(opts.referenceNotes ?? [])].sort((a, b) => a.t - b.t);
     this.notes = [...map.notes]
       .sort((a, b) => a.t - b.t)
       .map((n) => ({
@@ -535,6 +542,11 @@ export class Engine {
     // whether it was a tap or (long press) a hold tile.
     if (this.author) {
       if (t >= this.armAt && t <= this.map.duration && this.authorPending[lane] < 0) {
+        if (this.takeoverT === null) {
+          this.takeoverT = t;
+          this.takeoverAtMs = now;
+          buzz([20, 30, 20]);
+        }
         this.authorPending[lane] = t;
         this.rings.push({
           lane,
@@ -699,6 +711,11 @@ export class Engine {
     } else {
       this.authorTaps.push({ t: start, lane });
     }
+  }
+
+  /** Song time of the first new tap in a punch-in take (null = none yet). */
+  getTakeoverT(): number | null {
+    return this.takeoverT;
   }
 
   /** Chart studio: recorded presses (latency-compensated); flushes any
@@ -1386,6 +1403,7 @@ export class Engine {
     this.drawSkyEvents(g);
     this.drawRoad(g, t, hue, env, prog, pulse);
     this.drawNotes(g, t, prog);
+    if (this.author) this.drawReferenceNotes(g, t, prog);
     this.drawHitLine(g, hue, prog, now, pulse);
     this.drawEffects(g, now);
     this.drawComboPulse(g, t, env, hue);
@@ -1782,6 +1800,57 @@ export class Engine {
       );
     }
     g.restore();
+  }
+
+  /** Punch-in reference: the previous take's tiles, translucent, shown
+   * until the first new tap takes over (then only pre-takeover ones). */
+  private drawReferenceNotes(g: CanvasRenderingContext2D, t: number, prog: number): void {
+    if (this.referenceNotes.length === 0) return;
+    const tJudge = t - this.effOffset();
+    const approach = this.approachAt(Math.max(0, t));
+    const REF_ALPHA = 0.34;
+    for (const n of this.referenceNotes) {
+      const d = (n.t - tJudge) / approach;
+      if (d > 1.05) break;
+      if (this.takeoverT !== null && n.t >= this.takeoverT) continue;
+      const hue = laneHue(n.lane, prog);
+      if (n.kind === 'hold' && n.dur) {
+        const dTail = (n.t + n.dur - tJudge) / approach;
+        if (dTail < -0.12) continue;
+        const prH = this.proj(Math.max(d, -0.1));
+        const prT = this.proj(Math.min(dTail, 1.05));
+        const yH = this.yAt(prH);
+        const yT = this.yAt(prT);
+        const cxH = this.laneX(n.lane, prH);
+        const cxT = this.laneX(n.lane, prT);
+        const halfH = this.laneW * 0.2 * prH;
+        const halfT = this.laneW * 0.2 * prT;
+        g.globalAlpha = REF_ALPHA * 0.7;
+        g.fillStyle = `hsla(${hue}, 90%, 60%, 0.8)`;
+        g.beginPath();
+        g.moveTo(cxT - halfT, yT);
+        g.lineTo(cxT + halfT, yT);
+        g.lineTo(cxH + halfH, yH);
+        g.lineTo(cxH - halfH, yH);
+        g.closePath();
+        g.fill();
+        g.globalAlpha = 1;
+        this.drawTile(g, n.lane, prH, this.proj(Math.max(d, -0.1) + TILE_LEN * 0.8), hue, REF_ALPHA);
+      } else {
+        if (d < -0.12) continue;
+        this.drawTile(
+          g,
+          n.lane,
+          this.proj(d),
+          this.proj(d + TILE_LEN),
+          hue,
+          REF_ALPHA,
+          1,
+          false,
+          n.kind === 'double'
+        );
+      }
+    }
   }
 
   /** Bonus gem: an iridescent faceted jewel that spins as it approaches. */
@@ -2286,6 +2355,49 @@ export class Engine {
     const by = py + 9 * dpr;
     g.fillRect(bx, by, 4.5 * dpr, 14 * dpr);
     g.fillRect(bx + 8.5 * dpr, by, 4.5 * dpr, 14 * dpr);
+
+    // Punch-in state banner: cue mode until the first tap, then RE-RECORDING.
+    if (this.referenceNotes.length > 0 && t >= this.armAt) {
+      g.save();
+      g.textAlign = 'center';
+      if (this.takeoverT === null) {
+        const blink = 0.65 + 0.35 * Math.sin(now / 220);
+        g.globalAlpha = blink;
+        g.font = `900 ${Math.round(20 * dpr)}px ${COMIC_FONT}`;
+        g.lineJoin = 'round';
+        g.lineWidth = 5 * dpr;
+        g.strokeStyle = 'rgba(8, 5, 28, 0.9)';
+        g.strokeText('▶ CUE MODE', w / 2, h * 0.3);
+        g.fillStyle = '#ffd76e';
+        g.fillText('▶ CUE MODE', w / 2, h * 0.3);
+        g.globalAlpha = 0.75;
+        g.font = `600 ${Math.round(11 * dpr)}px system-ui, sans-serif`;
+        g.fillStyle = '#ffffff';
+        g.fillText('old tiles playing — your first tap takes over', w / 2, h * 0.3 + 18 * dpr);
+      } else {
+        const age = now - this.takeoverAtMs;
+        const popIn = age < 400 ? easeOutBack(Math.min(1, age / 400)) : 1;
+        g.save();
+        g.translate(w / 2, h * 0.3);
+        g.scale(popIn, popIn);
+        g.globalAlpha = age < 3000 ? 1 : 0.75;
+        g.font = `900 ${Math.round(20 * dpr)}px ${COMIC_FONT}`;
+        g.lineJoin = 'round';
+        g.lineWidth = 5 * dpr;
+        g.strokeStyle = 'rgba(8, 5, 28, 0.9)';
+        g.strokeText('⏺ RE-RECORDING', 0, 0);
+        g.fillStyle = '#ff5d7d';
+        g.fillText('⏺ RE-RECORDING', 0, 0);
+        if (age < 3000) {
+          g.globalAlpha = 0.75;
+          g.font = `600 ${Math.round(11 * dpr)}px system-ui, sans-serif`;
+          g.fillStyle = '#ffffff';
+          g.fillText('replacing tiles from here on', 0, 18 * dpr);
+        }
+        g.restore();
+      }
+      g.restore();
+    }
 
     // countdown until recording arms (handles punch-in pre-roll too)
     const wait = this.armAt - t;

@@ -171,19 +171,24 @@ export default function ChartStudio({ songId }: { songId: string }) {
       const engineMap: Beatmap =
         mode === 'record' ? { ...map, notes: [] } : { ...map, notes: notes ?? [] };
       const finishTake = () => {
-        const taps = engineRef.current?.getAuthorTaps() ?? [];
+        const eng = engineRef.current;
+        const taps = eng?.getAuthorTaps() ?? [];
+        const takeover = eng?.getTakeoverT() ?? null;
         const m = mapRef.current;
-        if (m) {
-          const fresh = quantizeTaps(taps, m);
-          // Punch-in keeps everything before the punch point.
-          setRecorded((prev) => {
-            const from = punchFromRef.current;
-            const kept = from > 0 ? prev.filter((n) => n.t < from - 0.001) : [];
-            return [...kept, ...fresh.filter((n) => n.t >= from - 0.001)].sort(
+        if (!m) return;
+        const fresh = quantizeTaps(taps, m);
+        setRecorded((prev) => {
+          if (punchFromRef.current > 0) {
+            // Punch-in: nothing changes until the first tap; from there the
+            // new take replaces the old one.
+            if (takeover === null) return prev;
+            const from = fresh.length > 0 ? Math.min(takeover, fresh[0].t) : takeover;
+            return [...prev.filter((n) => n.t < from - 0.001), ...fresh].sort(
               (a, b) => a.t - b.t
             );
-          });
-        }
+          }
+          return fresh; // full re-record replaces everything
+        });
       };
       const engine = new Engine(
         canvas,
@@ -204,6 +209,8 @@ export default function ChartStudio({ songId }: { songId: string }) {
           author: mode === 'record',
           startAt: mode === 'record' ? Math.max(0, punchFrom - PUNCH_PREROLL) : 0,
           armAt: mode === 'record' ? punchFrom : 0,
+          referenceNotes:
+            mode === 'record' && punchFrom > 0 ? recorded : undefined,
         }
       );
       engine.offsetMs = Number(localStorage.getItem('mm-offset-ms') ?? 0) || 0;
@@ -211,22 +218,27 @@ export default function ChartStudio({ songId }: { songId: string }) {
       engine.start();
       setPhase(mode === 'record' ? 'recording' : 'preview');
     },
-    [title]
+    [recorded, title]
   );
 
   const finishRecording = useCallback(() => {
     // In preview, "finish" just returns to review without touching the take.
     if (modeRef.current === 'record') {
-      const taps = engineRef.current?.getAuthorTaps() ?? [];
+      const eng = engineRef.current;
+      const taps = eng?.getAuthorTaps() ?? [];
+      const takeover = eng?.getTakeoverT() ?? null;
       const m = mapRef.current;
       if (m) {
         const fresh = quantizeTaps(taps, m);
         setRecorded((prev) => {
-          const from = punchFromRef.current;
-          const kept = from > 0 ? prev.filter((n) => n.t < from - 0.001) : [];
-          return [...kept, ...fresh.filter((n) => n.t >= from - 0.001)].sort(
-            (a, b) => a.t - b.t
-          );
+          if (punchFromRef.current > 0) {
+            if (takeover === null) return prev;
+            const from = fresh.length > 0 ? Math.min(takeover, fresh[0].t) : takeover;
+            return [...prev.filter((n) => n.t < from - 0.001), ...fresh].sort(
+              (a, b) => a.t - b.t
+            );
+          }
+          return fresh;
         });
       }
     }
@@ -426,9 +438,9 @@ export default function ChartStudio({ songId }: { songId: string }) {
           </div>
           {fromT > 0 && (
             <p className="subtle scrub-hint">
-              Keeps the {recorded.filter((n) => n.t < fromT).length} tiles
-              before {fmtTime(fromT)}; you&apos;ll hear a {PUNCH_PREROLL}s
-              run-up first.
+              Old tiles play translucently from {fmtTime(fromT)} so you can
+              cue in — nothing changes until your first tap, which takes
+              over from there. ({PUNCH_PREROLL}s run-up first.)
             </p>
           )}
           <button className="ghost-btn" onClick={() => void startEngine('record')}>
