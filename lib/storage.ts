@@ -166,6 +166,22 @@ const GHOSTS_DIR = path.join(process.cwd(), '.data', 'ghosts');
 export const MAX_CHART_BYTES = 800 * 1024;
 export const MAX_GHOST_BYTES = 300 * 1024;
 
+export async function deleteCachedChart(
+  songId: string,
+  version: number,
+  difficulty: number
+): Promise<void> {
+  const key = chartKey(songId, version, difficulty);
+  if (storageMode() === 'blob') {
+    const pathname = `charts/${songId}/${key}.json`;
+    const res = await list({ prefix: pathname, limit: 5 });
+    const blob = res.blobs.find((b) => b.pathname === pathname);
+    if (blob) await del([blob.url]);
+  } else {
+    await fs.rm(path.join(CHARTS_DIR, `${key}.json`), { force: true });
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Ghost replays — one JSON document per song per player
 // ---------------------------------------------------------------------------

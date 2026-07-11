@@ -8,6 +8,7 @@ export function serializeChart(map: Beatmap): string {
     duration: map.duration,
     envelopeRate: map.envelopeRate,
     envelope: Array.from(map.envelope, (x) => Math.round(x * 1000) / 1000),
+    grid: map.grid,
   });
 }
 
@@ -19,6 +20,7 @@ export function deserializeChart(data: unknown): Beatmap | null {
       duration: number;
       envelopeRate: number;
       envelope: number[];
+      grid?: { period: number; phase: number; confidence: number };
     };
     if (
       !Array.isArray(d.notes) ||
@@ -36,6 +38,7 @@ export function deserializeChart(data: unknown): Beatmap | null {
       duration: d.duration,
       envelopeRate: d.envelopeRate,
       envelope: Float32Array.from(d.envelope),
+      grid: d.grid,
     };
   } catch {
     return null;

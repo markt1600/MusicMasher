@@ -218,6 +218,11 @@ export async function analyzeAudio(
     duration,
     envelope,
     envelopeRate: ENVELOPE_RATE,
+    grid: {
+      period: grid.period,
+      phase: grid.phase,
+      confidence: Math.round(grid.confidence * 100) / 100,
+    },
   };
 }
 

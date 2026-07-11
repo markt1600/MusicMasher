@@ -38,6 +38,8 @@ export interface Beatmap {
   /** Coarse loudness envelope (ENVELOPE_RATE samples/sec, values 0..1) for visuals. */
   envelope: Float32Array;
   envelopeRate: number;
+  /** Fitted beat grid (present when analysis ran with tempo fitting). */
+  grid?: { period: number; phase: number; confidence: number };
 }
 
 export type Judgement = 'perfect' | 'great' | 'good' | 'miss';

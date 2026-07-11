@@ -106,7 +106,11 @@ piece of setup.
 ## Admin
 
 `/admin` (also linked from the library footer) lets you edit song titles and
-artists, and delete uploaded songs. It's password-protected: the password is
+artists, delete uploaded songs, and open the **Chart Studio** for any song:
+the song plays while you tap the lanes where tiles should fall, taps are
+quantized to the beat grid, and after previewing you can save the take as the
+song's chart — a hand-authored, pre-determined level that replaces procedural
+generation for every player (removable to revert). It's password-protected: the password is
 whatever the `ADMIN_PASSWORD` environment variable is set to (in Vercel, or
 `.env.local` for local dev). If the variable isn't set, admin features are
 disabled entirely. Deletion removes both the audio and its metadata for

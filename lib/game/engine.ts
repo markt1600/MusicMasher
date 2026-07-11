@@ -153,6 +153,8 @@ export interface EngineOptions {
   stageLabel?: string;
   /** A recorded run to race against: score events as [t, score, combo, lane]. */
   ghost?: { name: string; events: number[][] };
+  /** Chart studio: record taps instead of judging notes. */
+  author?: boolean;
 }
 
 export interface EngineCallbacks {
@@ -285,6 +287,8 @@ export class Engine {
   private theme: ThemeName = 'synthwave';
   private difficulty = 1;
   private stageLabel = '';
+  private author = false;
+  private authorTaps: { t: number; lane: number }[] = [];
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -308,6 +312,7 @@ export class Engine {
     this.difficulty = Math.max(1, Math.min(5, opts.difficulty ?? 1));
     this.stageLabel = opts.stageLabel ?? '';
     this.ghost = opts.ghost ?? null;
+    this.author = opts.author ?? false;
     this.notes = [...map.notes]
       .sort((a, b) => a.t - b.t)
       .map((n) => ({
@@ -513,6 +518,21 @@ export class Engine {
     buzz(6);
     const t = this.songTime() - this.effOffset();
 
+    // Chart studio: record the tap instead of judging anything.
+    if (this.author) {
+      if (t >= 0 && t <= this.map.duration) {
+        this.authorTaps.push({ t, lane });
+        this.rings.push({
+          lane,
+          born: now,
+          color: `hsl(${LANE_HUES[lane]}, 100%, 75%)`,
+          ghost: false,
+        });
+        this.spawnHitEffects(lane, 'great');
+      }
+      return;
+    }
+
     // A double waiting for its second tap takes priority.
     for (let i = this.nextJudgeIdx; i < this.notes.length; i++) {
       const n = this.notes[i];
@@ -644,6 +664,11 @@ export class Engine {
   /** The recorded run — becomes a ghost others can race. */
   getReplay(): number[][] {
     return this.replayEvents;
+  }
+
+  /** Chart studio: raw recorded taps (already latency-compensated). */
+  getAuthorTaps(): { t: number; lane: number }[] {
+    return this.authorTaps;
   }
 
   /** Escalating combo-milestone celebration: popup + firework burst. */
@@ -857,6 +882,28 @@ export class Engine {
 
   private update(): void {
     const t = this.songTime() - this.effOffset();
+
+    // Chart studio: no judging/survival/ghosts — just effects and the end.
+    if (this.author) {
+      const grav0 = this.h * 0.00012;
+      for (let i = this.particles.length - 1; i >= 0; i--) {
+        const p = this.particles[i];
+        p.life += 16.7;
+        p.x += p.vx;
+        p.y += p.vy;
+        p.vy += grav0;
+        if (p.life >= p.maxLife) this.particles.splice(i, 1);
+      }
+      const nowA = performance.now();
+      this.rings = this.rings.filter((r) => nowA - r.born < 450);
+      this.texts = this.texts.filter((tx) => nowA - tx.born < 700);
+      if (!this.ended && this.songTime() > this.map.duration + 0.6) {
+        this.ended = true;
+        cancelAnimationFrame(this.raf);
+        this.cb.onEnd(this.stats(), false);
+      }
+      return;
+    }
 
     // Auto-miss notes that scrolled past the window. Doubles get extra time
     // for their second tap; one-of-two lands as a 'good'.
@@ -1302,7 +1349,8 @@ export class Engine {
     this.drawHitLine(g, hue, prog, now, pulse);
     this.drawEffects(g, now);
     this.drawComboPulse(g, t, env, hue);
-    this.drawHUD(g, t, prog, now, hue);
+    if (this.author) this.drawAuthorHUD(g, t, prog, now, hue);
+    else this.drawHUD(g, t, prog, now, hue);
   }
 
   private drawBackground(
@@ -2123,6 +2171,95 @@ export class Engine {
     g.fillStyle = grad;
     g.fillRect(0, 0, w, h);
     g.restore();
+  }
+
+  /** Recording HUD: progress, blinking REC, tap count, elapsed time. */
+  private drawAuthorHUD(
+    g: CanvasRenderingContext2D,
+    t: number,
+    prog: number,
+    now: number,
+    hue: number
+  ): void {
+    const { w, h, dpr } = this;
+
+    g.fillStyle = 'rgba(255,255,255,0.12)';
+    g.fillRect(0, 0, w, 3 * dpr);
+    g.fillStyle = `hsl(${hue}, 100%, 65%)`;
+    g.fillRect(0, 0, w * prog, 3 * dpr);
+
+    // blinking REC badge
+    g.save();
+    g.textAlign = 'left';
+    if (Math.floor(now / 500) % 2 === 0 && t >= 0) {
+      g.fillStyle = '#ff4d5e';
+      g.beginPath();
+      g.arc(18 * dpr, 24 * dpr, 5 * dpr, 0, Math.PI * 2);
+      g.fill();
+    }
+    g.font = `900 ${Math.round(13 * dpr)}px ${COMIC_FONT}`;
+    g.fillStyle = '#ff8fa5';
+    g.fillText('REC', 28 * dpr, 29 * dpr);
+    g.restore();
+
+    // tap count, centered
+    g.save();
+    g.textAlign = 'center';
+    g.font = `900 ${Math.round(30 * dpr)}px ${COMIC_FONT}`;
+    g.lineJoin = 'round';
+    g.lineWidth = 6 * dpr;
+    g.strokeStyle = 'rgba(8, 5, 28, 0.9)';
+    const label = `${this.authorTaps.length}`;
+    g.strokeText(label, w / 2, 40 * dpr);
+    g.fillStyle = `hsl(${hue}, 100%, 75%)`;
+    g.fillText(label, w / 2, 40 * dpr);
+    g.font = `700 ${Math.round(10 * dpr)}px system-ui, sans-serif`;
+    g.fillStyle = 'rgba(255,255,255,0.55)';
+    g.fillText('TILES PLACED', w / 2, 56 * dpr);
+    // elapsed
+    const el = Math.max(0, t);
+    const fmt = (x: number) =>
+      `${Math.floor(x / 60)}:${String(Math.floor(x % 60)).padStart(2, '0')}`;
+    g.fillText(`${fmt(el)} / ${fmt(this.map.duration)}`, w / 2, 72 * dpr);
+    g.restore();
+
+    // pause pill (same hit target as gameplay)
+    const pw2 = 48 * dpr;
+    const ph = 32 * dpr;
+    const px = w - pw2 - 12 * dpr;
+    const py = 12 * dpr;
+    const pr = ph / 2;
+    g.beginPath();
+    g.moveTo(px + pr, py);
+    g.lineTo(px + pw2 - pr, py);
+    g.arc(px + pw2 - pr, py + pr, pr, -Math.PI / 2, Math.PI / 2);
+    g.lineTo(px + pr, py + ph);
+    g.arc(px + pr, py + pr, pr, Math.PI / 2, -Math.PI / 2);
+    g.closePath();
+    g.fillStyle = 'rgba(10, 8, 30, 0.55)';
+    g.fill();
+    g.strokeStyle = 'rgba(255,255,255,0.4)';
+    g.lineWidth = 1.2 * dpr;
+    g.stroke();
+    g.fillStyle = 'rgba(255,255,255,0.9)';
+    const bx = px + pw2 / 2 - 6.5 * dpr;
+    const by = py + 9 * dpr;
+    g.fillRect(bx, by, 4.5 * dpr, 14 * dpr);
+    g.fillRect(bx + 8.5 * dpr, by, 4.5 * dpr, 14 * dpr);
+
+    // countdown before the music starts
+    if (t < 0) {
+      g.save();
+      g.textAlign = 'center';
+      const count = Math.ceil(-t);
+      g.fillStyle = '#ffffff';
+      g.font = `900 ${Math.round(56 * dpr)}px ${COMIC_FONT}`;
+      if (count <= 3) g.fillText(String(count), w / 2, h * 0.45);
+      g.globalAlpha = 0.6;
+      g.font = `600 ${Math.round(12 * dpr)}px system-ui, sans-serif`;
+      g.fillText('Tap the lanes where tiles should fall', w / 2, h * 0.53);
+      g.restore();
+    }
   }
 
   private drawHUD(

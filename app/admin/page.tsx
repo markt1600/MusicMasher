@@ -262,6 +262,9 @@ export default function AdminPage() {
                         .join(' · ')}
                     </div>
                   </div>
+                  <Link href={`/admin/create/${s.id}`} className="edit-btn">
+                    Chart
+                  </Link>
                   <button
                     className="edit-btn"
                     disabled={busyId !== null}
