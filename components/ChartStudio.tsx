@@ -20,39 +20,75 @@ type Phase =
 
 const PW_KEY = 'mm-admin-pw';
 
+type AuthorTap = { t: number; lane: number; dur?: number; kind?: 'bonus' };
+
+/** Two quick presses on the same pad within this gap read as one
+ * double-tap tile rather than two separate tiles. */
+const DOUBLE_GAP = 0.24;
+
 /**
  * Snap recorded presses to the nearest 16th-note subdivision of the fitted
  * beat grid; presses landing in the same subdivision + lane collapse to
- * one. Long presses become hold tiles with beat-multiple durations.
+ * one. Long presses become hold tiles with beat-multiple durations, rapid
+ * same-lane double-taps become double tiles, and gem-button presses become
+ * bonus gems.
  */
-function quantizeTaps(
-  taps: { t: number; lane: number; dur?: number }[],
-  map: Beatmap
-): Note[] {
+function quantizeTaps(taps: AuthorTap[], map: Beatmap): Note[] {
   const period =
     map.grid && map.grid.confidence >= 1.2 ? map.grid.period : 60 / map.bpm;
   const phase = map.grid?.phase ?? 0;
   const sub = period / 4;
+
+  // Merge rapid same-lane tap pairs into double tiles first (holds and gems
+  // never merge). Taps arrive in release order, so sort by time.
+  const merged: (AuthorTap & { double?: boolean })[] = [];
+  for (const tap of [...taps].sort((a, b) => a.t - b.t)) {
+    const prev = merged[merged.length - 1];
+    if (
+      prev &&
+      !prev.double &&
+      prev.lane === tap.lane &&
+      prev.dur === undefined &&
+      tap.dur === undefined &&
+      prev.kind === undefined &&
+      tap.kind === undefined &&
+      tap.t - prev.t <= DOUBLE_GAP
+    ) {
+      prev.double = true;
+      continue;
+    }
+    merged.push({ ...tap });
+  }
+
   const seen = new Set<string>();
   const notes: Note[] = [];
-  for (const tap of taps) {
+  for (const tap of merged) {
     if (tap.t < 0.3 || tap.t > map.duration - 0.2) continue;
     const k = Math.round((tap.t - phase) / sub);
     const t = Math.max(0.3, phase + k * sub);
     const key = `${Math.round(t * 1000)}:${tap.lane}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    const tq = Math.round(t * 1000) / 1000;
+    if (tap.kind === 'bonus') {
+      notes.push({ t: tq, lane: tap.lane, kind: 'bonus' });
+      continue;
+    }
     if (tap.dur !== undefined) {
       const dur = Math.min(
         Math.max(sub * 2, Math.round(tap.dur / sub) * sub),
         map.duration - 0.3 - t
       );
       if (dur >= 0.35) {
-        notes.push({ t: Math.round(t * 1000) / 1000, lane: tap.lane, kind: 'hold', dur: Math.round(dur * 1000) / 1000 });
+        notes.push({ t: tq, lane: tap.lane, kind: 'hold', dur: Math.round(dur * 1000) / 1000 });
         continue;
       }
     }
-    notes.push({ t: Math.round(t * 1000) / 1000, lane: tap.lane });
+    if (tap.double) {
+      notes.push({ t: tq, lane: tap.lane, kind: 'double' });
+      continue;
+    }
+    notes.push({ t: tq, lane: tap.lane });
   }
   return notes.sort((a, b) => a.t - b.t);
 }
@@ -341,7 +377,9 @@ export default function ChartStudio({ songId }: { songId: string }) {
             <b>{title}</b>
             <br />
             The song will play — tap the lanes (or <b>A S D</b>) where tiles
-            should fall, and <b>long-press</b> to place hold tiles.
+            should fall. <b>Long-press</b> to place hold tiles,{' '}
+            <b>double-tap quickly</b> for a double tile, and hit the floating
+            gem buttons above the pads (or <b>Q W E</b>) to place bonus gems.
             Slightly-off taps snap to the beat automatically.
             {hasAuthored && (
               <>

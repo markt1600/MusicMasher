@@ -295,8 +295,9 @@ export class Engine {
   private difficulty = 1;
   private stageLabel = '';
   private author = false;
-  private authorTaps: { t: number; lane: number; dur?: number }[] = [];
+  private authorTaps: { t: number; lane: number; dur?: number; kind?: 'bonus' }[] = [];
   private authorPending = new Float64Array(LANES).fill(-1);
+  private gemPressUntil = new Float64Array(LANES);
   private startOffset = 0;
   private armAt = 0;
   private referenceNotes: Note[] = [];
@@ -448,6 +449,18 @@ export class Engine {
       return;
     }
     if (this.paused || this.ended) return;
+    // Chart studio: gem buttons floating above the pads place bonus gems.
+    if (this.author) {
+      for (let lane = 0; lane < LANES; lane++) {
+        const b = this.gemBtn(lane);
+        const dx = x - b.x;
+        const dy = y - b.y;
+        if (dx * dx + dy * dy <= b.r * b.r * 2.4) {
+          this.tapGem(lane);
+          return;
+        }
+      }
+    }
     const lane = Math.max(0, Math.min(LANES - 1, Math.floor((x / this.w) * LANES)));
     this.pointerLanes.set(e.pointerId, lane);
     this.laneHeld[lane]++;
@@ -473,6 +486,14 @@ export class Engine {
       return;
     }
     if (this.paused || this.ended) return;
+    if (this.author) {
+      const gl = gemKeyLane(k);
+      if (gl >= 0) {
+        e.preventDefault();
+        this.tapGem(gl);
+        return;
+      }
+    }
     const lane = keyLane(k);
     if (lane >= 0 && !this.keysDown.has(k)) {
       e.preventDefault();
@@ -713,6 +734,38 @@ export class Engine {
     }
   }
 
+  /** Author-mode gem button (one per lane) hovering above the hit pads. */
+  private gemBtn(lane: number): { x: number; y: number; r: number } {
+    return {
+      x: this.laneX(lane, 1),
+      y: this.hitY - this.laneW * 0.58,
+      r: this.laneW * 0.16,
+    };
+  }
+
+  /** Chart studio: a gem-button press places a bonus gem in that lane. */
+  private tapGem(lane: number): void {
+    const now = performance.now();
+    this.gemPressUntil[lane] = now + 180;
+    buzz(6);
+    const t = this.songTime() - this.effOffset();
+    if (t < this.armAt || t > this.map.duration) return;
+    if (this.takeoverT === null) {
+      this.takeoverT = t;
+      this.takeoverAtMs = now;
+      buzz([20, 30, 20]);
+    }
+    this.authorTaps.push({ t, lane, kind: 'bonus' });
+    this.rings.push({
+      lane,
+      born: now,
+      color: `hsl(${(now / 12 + lane * 60) % 360}, 100%, 80%)`,
+      ghost: false,
+    });
+    this.texts.push({ lane, born: now, text: 'GEM ✦', color: '#ffe9a8' });
+    this.spawnHitEffects(lane, 'perfect');
+  }
+
   /** Song time of the first new tap in a punch-in take (null = none yet). */
   getTakeoverT(): number | null {
     return this.takeoverT;
@@ -720,7 +773,7 @@ export class Engine {
 
   /** Chart studio: recorded presses (latency-compensated); flushes any
    * presses still held down. */
-  getAuthorTaps(): { t: number; lane: number; dur?: number }[] {
+  getAuthorTaps(): { t: number; lane: number; dur?: number; kind?: 'bonus' }[] {
     const t = this.songTime() - this.effOffset();
     for (let lane = 0; lane < LANES; lane++) {
       this.finalizeAuthorPress(lane, t);
@@ -1836,6 +1889,12 @@ export class Engine {
         g.fill();
         g.globalAlpha = 1;
         this.drawTile(g, n.lane, prH, this.proj(Math.max(d, -0.1) + TILE_LEN * 0.8), hue, REF_ALPHA);
+      } else if (n.kind === 'bonus') {
+        if (d < -0.12) continue;
+        g.save();
+        g.globalAlpha = REF_ALPHA;
+        this.drawGem(g, n.lane, d);
+        g.restore();
       } else {
         if (d < -0.12) continue;
         this.drawTile(
@@ -1851,6 +1910,7 @@ export class Engine {
         );
       }
     }
+    g.globalAlpha = 1;
   }
 
   /** Bonus gem: an iridescent faceted jewel that spins as it approaches. */
@@ -2283,6 +2343,76 @@ export class Engine {
   }
 
   /** Recording HUD: progress, blinking REC, tap count, elapsed time. */
+  /** Author-mode gem buttons: small faceted jewels hovering above the pads.
+   * Pressing one drops a bonus gem in that lane. */
+  private drawGemButtons(g: CanvasRenderingContext2D, now: number): void {
+    const { dpr } = this;
+    for (let lane = 0; lane < LANES; lane++) {
+      const { x, y, r } = this.gemBtn(lane);
+      const pressed = now < this.gemPressUntil[lane];
+      const hue = (now / 12 + lane * 60) % 360;
+      const spin = 0.55 + 0.45 * Math.abs(Math.cos(now / 520 + lane * 2));
+      const grow = pressed ? 1.3 : 1;
+      const rx = r * spin * grow;
+      const ry = r * 0.78 * grow;
+
+      // socket ring so it reads as a button, not a falling gem
+      g.save();
+      g.strokeStyle = `hsla(${hue}, 90%, 78%, ${pressed ? 0.95 : 0.42})`;
+      g.lineWidth = (pressed ? 2 : 1.3) * dpr;
+      g.beginPath();
+      g.ellipse(x, y, r * 1.5, r * 1.1, 0, 0, Math.PI * 2);
+      g.stroke();
+
+      if (pressed) {
+        g.globalCompositeOperation = 'lighter';
+        const halo = g.createRadialGradient(x, y, r * 0.2, x, y, r * 2.4);
+        halo.addColorStop(0, `hsla(${hue}, 100%, 78%, 0.55)`);
+        halo.addColorStop(1, 'hsla(0,0%,0%,0)');
+        g.fillStyle = halo;
+        g.fillRect(x - r * 2.4, y - r * 2.4, r * 4.8, r * 4.8);
+        g.globalCompositeOperation = 'source-over';
+      }
+
+      // faceted mini diamond, same look as the in-chart bonus gem
+      const pts = [
+        [x, y - ry],
+        [x + rx, y],
+        [x, y + ry],
+        [x - rx, y],
+      ];
+      const light = pressed ? [94, 78, 62, 86] : [82, 60, 45, 68];
+      for (let i = 0; i < 4; i++) {
+        const a = pts[i];
+        const b = pts[(i + 1) % 4];
+        g.fillStyle = `hsl(${(hue + i * 14) % 360}, 95%, ${light[i]}%)`;
+        g.beginPath();
+        g.moveTo(x, y);
+        g.lineTo(a[0], a[1]);
+        g.lineTo(b[0], b[1]);
+        g.closePath();
+        g.fill();
+      }
+      g.strokeStyle = `hsla(${hue}, 100%, 90%, 0.9)`;
+      g.lineWidth = 1.2 * dpr;
+      g.beginPath();
+      g.moveTo(pts[0][0], pts[0][1]);
+      for (let i = 1; i < 4; i++) g.lineTo(pts[i][0], pts[i][1]);
+      g.closePath();
+      g.stroke();
+      g.restore();
+    }
+
+    // caption above the middle gem button
+    const mid = this.gemBtn(1);
+    g.save();
+    g.textAlign = 'center';
+    g.font = `700 ${Math.round(9 * dpr)}px system-ui, sans-serif`;
+    g.fillStyle = 'rgba(255, 233, 168, 0.6)';
+    g.fillText('BONUS GEMS · Q W E', mid.x, mid.y - mid.r * 1.9);
+    g.restore();
+  }
+
   private drawAuthorHUD(
     g: CanvasRenderingContext2D,
     t: number,
@@ -2291,6 +2421,8 @@ export class Engine {
     hue: number
   ): void {
     const { w, h, dpr } = this;
+
+    this.drawGemButtons(g, now);
 
     g.fillStyle = 'rgba(255,255,255,0.12)';
     g.fillRect(0, 0, w, 3 * dpr);
@@ -2698,6 +2830,14 @@ function keyLane(k: string): number {
   if (k === 'a' || k === 'j' || k === 'arrowleft' || k === '1') return 0;
   if (k === 's' || k === 'k' || k === 'arrowdown' || k === '2') return 1;
   if (k === 'd' || k === 'l' || k === 'arrowright' || k === '3') return 2;
+  return -1;
+}
+
+/** Chart studio gem buttons: the keyboard row above each lane's keys. */
+function gemKeyLane(k: string): number {
+  if (k === 'q' || k === 'u' || k === '7') return 0;
+  if (k === 'w' || k === 'i' || k === '8') return 1;
+  if (k === 'e' || k === 'o' || k === '9') return 2;
   return -1;
 }
 

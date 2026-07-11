@@ -108,7 +108,9 @@ piece of setup.
 `/admin` (also linked from the library footer) lets you edit song titles and
 artists, delete uploaded songs, and open the **Chart Studio** for any song:
 the song plays while you tap the lanes where tiles should fall (long-press to
-place hold tiles), taps are quantized to the beat grid, and after previewing
+place hold tiles, double-tap quickly for a double tile, and hit the gem
+buttons above the pads — or `Q W E` — to place bonus gems), taps are
+quantized to the beat grid, and after previewing
 you can save the take as the song's chart — a hand-authored, pre-determined
 level that replaces procedural generation for every player (removable to
 revert). Saved charts reload for editing, and a scrubber lets you punch-in
