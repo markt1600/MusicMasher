@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { analyzeAudio } from '@/lib/analyze';
-import { serializeChart } from '@/lib/chart-io';
+import { serializeChart, deserializeChart } from '@/lib/chart-io';
 import { decodeAudio } from '@/lib/aiff';
 import { Engine } from '@/lib/game/engine';
 import type { Beatmap, Note } from '@/lib/types';
@@ -21,11 +21,12 @@ type Phase =
 const PW_KEY = 'mm-admin-pw';
 
 /**
- * Snap recorded taps to the nearest 16th-note subdivision of the fitted
- * beat grid; taps landing in the same subdivision + lane collapse to one.
+ * Snap recorded presses to the nearest 16th-note subdivision of the fitted
+ * beat grid; presses landing in the same subdivision + lane collapse to
+ * one. Long presses become hold tiles with beat-multiple durations.
  */
 function quantizeTaps(
-  taps: { t: number; lane: number }[],
+  taps: { t: number; lane: number; dur?: number }[],
   map: Beatmap
 ): Note[] {
   const period =
@@ -41,10 +42,27 @@ function quantizeTaps(
     const key = `${Math.round(t * 1000)}:${tap.lane}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    if (tap.dur !== undefined) {
+      const dur = Math.min(
+        Math.max(sub * 2, Math.round(tap.dur / sub) * sub),
+        map.duration - 0.3 - t
+      );
+      if (dur >= 0.35) {
+        notes.push({ t: Math.round(t * 1000) / 1000, lane: tap.lane, kind: 'hold', dur: Math.round(dur * 1000) / 1000 });
+        continue;
+      }
+    }
     notes.push({ t: Math.round(t * 1000) / 1000, lane: tap.lane });
   }
   return notes.sort((a, b) => a.t - b.t);
 }
+
+function fmtTime(x: number): string {
+  return `${Math.floor(x / 60)}:${String(Math.floor(x % 60)).padStart(2, '0')}`;
+}
+
+/** Audio pre-roll before a punch-in point, so you hear the run-up. */
+const PUNCH_PREROLL = 3;
 
 export default function ChartStudio({ songId }: { songId: string }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -62,7 +80,10 @@ export default function ChartStudio({ songId }: { songId: string }) {
   const [hasAuthored, setHasAuthored] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [fromT, setFromT] = useState(0);
+  const [duration, setDuration] = useState(0);
   const modeRef = useRef<'record' | 'preview'>('record');
+  const punchFromRef = useRef(0);
 
   const pw =
     typeof window !== 'undefined' ? sessionStorage.getItem(PW_KEY) : null;
@@ -87,7 +108,11 @@ export default function ChartStudio({ songId }: { songId: string }) {
 
         try {
           const a = await fetch(`/api/charts/${songId}?authored=1`);
-          if (!cancelled) setHasAuthored(a.ok);
+          if (a.ok && !cancelled) {
+            setHasAuthored(true);
+            const existing = deserializeChart(await a.json());
+            if (existing) setRecorded(existing.notes);
+          }
         } catch {
           // fine — no authored chart
         }
@@ -112,6 +137,7 @@ export default function ChartStudio({ songId }: { songId: string }) {
 
         bufferRef.current = buffer;
         mapRef.current = map;
+        setDuration(map.duration);
         setPct(null);
         setPhase('ready');
       } catch (err) {
@@ -131,7 +157,7 @@ export default function ChartStudio({ songId }: { songId: string }) {
   }, [songId]);
 
   const startEngine = useCallback(
-    async (mode: 'record' | 'preview', notes?: Note[]) => {
+    async (mode: 'record' | 'preview', notes?: Note[], punchFrom = 0) => {
       const canvas = canvasRef.current;
       const audioCtx = audioCtxRef.current;
       const buffer = bufferRef.current;
@@ -140,9 +166,25 @@ export default function ChartStudio({ songId }: { songId: string }) {
       engineRef.current?.destroy();
       setNotice(null);
       modeRef.current = mode;
+      punchFromRef.current = punchFrom;
       await audioCtx.resume();
       const engineMap: Beatmap =
         mode === 'record' ? { ...map, notes: [] } : { ...map, notes: notes ?? [] };
+      const finishTake = () => {
+        const taps = engineRef.current?.getAuthorTaps() ?? [];
+        const m = mapRef.current;
+        if (m) {
+          const fresh = quantizeTaps(taps, m);
+          // Punch-in keeps everything before the punch point.
+          setRecorded((prev) => {
+            const from = punchFromRef.current;
+            const kept = from > 0 ? prev.filter((n) => n.t < from - 0.001) : [];
+            return [...kept, ...fresh.filter((n) => n.t >= from - 0.001)].sort(
+              (a, b) => a.t - b.t
+            );
+          });
+        }
+      };
       const engine = new Engine(
         canvas,
         audioCtx,
@@ -151,18 +193,18 @@ export default function ChartStudio({ songId }: { songId: string }) {
         title,
         {
           onEnd: () => {
-            if (mode === 'record') {
-              const taps = engineRef.current?.getAuthorTaps() ?? [];
-              const m = mapRef.current;
-              if (m) setRecorded(quantizeTaps(taps, m));
-            }
+            if (mode === 'record') finishTake();
             engineRef.current?.destroy();
             engineRef.current = null;
             setPhase('review');
           },
           onPauseRequest: () => setPhase('rec-paused'),
         },
-        { author: mode === 'record' }
+        {
+          author: mode === 'record',
+          startAt: mode === 'record' ? Math.max(0, punchFrom - PUNCH_PREROLL) : 0,
+          armAt: mode === 'record' ? punchFrom : 0,
+        }
       );
       engine.offsetMs = Number(localStorage.getItem('mm-offset-ms') ?? 0) || 0;
       engineRef.current = engine;
@@ -177,7 +219,16 @@ export default function ChartStudio({ songId }: { songId: string }) {
     if (modeRef.current === 'record') {
       const taps = engineRef.current?.getAuthorTaps() ?? [];
       const m = mapRef.current;
-      if (m) setRecorded(quantizeTaps(taps, m));
+      if (m) {
+        const fresh = quantizeTaps(taps, m);
+        setRecorded((prev) => {
+          const from = punchFromRef.current;
+          const kept = from > 0 ? prev.filter((n) => n.t < from - 0.001) : [];
+          return [...kept, ...fresh.filter((n) => n.t >= from - 0.001)].sort(
+            (a, b) => a.t - b.t
+          );
+        });
+      }
     }
     engineRef.current?.destroy();
     engineRef.current = null;
@@ -278,7 +329,8 @@ export default function ChartStudio({ songId }: { songId: string }) {
             <b>{title}</b>
             <br />
             The song will play — tap the lanes (or <b>A S D</b>) where tiles
-            should fall. Slightly-off taps snap to the beat automatically.
+            should fall, and <b>long-press</b> to place hold tiles.
+            Slightly-off taps snap to the beat automatically.
             {hasAuthored && (
               <>
                 <br />
@@ -290,6 +342,11 @@ export default function ChartStudio({ songId }: { songId: string }) {
           <button className="big-btn pulse" onClick={() => void startEngine('record')}>
             ● &nbsp;Start recording
           </button>
+          {recorded.length > 0 && (
+            <button className="ghost-btn" onClick={() => setPhase('review')}>
+              ✏️ &nbsp;Review saved chart ({recorded.length} tiles)
+            </button>
+          )}
           {hasAuthored && (
             <button className="ghost-btn" disabled={busy} onClick={() => void removeAuthored()}>
               🗑 Remove custom chart
@@ -350,8 +407,32 @@ export default function ChartStudio({ songId }: { songId: string }) {
           >
             {busy ? 'Saving…' : '💾 Save as song chart'}
           </button>
+          <div className="scrub-row">
+            <input
+              type="range"
+              min={0}
+              max={Math.max(1, Math.ceil(duration - 1))}
+              step={1}
+              value={Math.min(fromT, Math.max(0, duration - 1))}
+              onChange={(e) => setFromT(Number(e.target.value))}
+            />
+            <button
+              className="ghost-btn scrub-btn"
+              disabled={busy}
+              onClick={() => void startEngine('record', undefined, fromT)}
+            >
+              ⏺ &nbsp;Re-record from {fmtTime(fromT)}
+            </button>
+          </div>
+          {fromT > 0 && (
+            <p className="subtle scrub-hint">
+              Keeps the {recorded.filter((n) => n.t < fromT).length} tiles
+              before {fmtTime(fromT)}; you&apos;ll hear a {PUNCH_PREROLL}s
+              run-up first.
+            </p>
+          )}
           <button className="ghost-btn" onClick={() => void startEngine('record')}>
-            ● &nbsp;Re-record
+            ● &nbsp;Re-record all
           </button>
           {hasAuthored && (
             <button className="ghost-btn" disabled={busy} onClick={() => void removeAuthored()}>

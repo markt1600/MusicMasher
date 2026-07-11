@@ -155,6 +155,10 @@ export interface EngineOptions {
   ghost?: { name: string; events: number[][] };
   /** Chart studio: record taps instead of judging notes. */
   author?: boolean;
+  /** Start playback at this song time (punch-in pre-roll). */
+  startAt?: number;
+  /** Author mode: taps only register from this song time onward. */
+  armAt?: number;
 }
 
 export interface EngineCallbacks {
@@ -288,7 +292,10 @@ export class Engine {
   private difficulty = 1;
   private stageLabel = '';
   private author = false;
-  private authorTaps: { t: number; lane: number }[] = [];
+  private authorTaps: { t: number; lane: number; dur?: number }[] = [];
+  private authorPending = new Float64Array(LANES).fill(-1);
+  private startOffset = 0;
+  private armAt = 0;
 
   constructor(
     canvas: HTMLCanvasElement,
@@ -313,6 +320,8 @@ export class Engine {
     this.stageLabel = opts.stageLabel ?? '';
     this.ghost = opts.ghost ?? null;
     this.author = opts.author ?? false;
+    this.startOffset = Math.max(0, opts.startAt ?? 0);
+    this.armAt = Math.max(this.startOffset, opts.armAt ?? 0);
     this.notes = [...map.notes]
       .sort((a, b) => a.t - b.t)
       .map((n) => ({
@@ -346,8 +355,8 @@ export class Engine {
     const src = this.audioCtx.createBufferSource();
     src.buffer = this.buffer;
     src.connect(this.audioCtx.destination);
-    this.startCtxTime = this.audioCtx.currentTime + LEAD_IN;
-    src.start(this.startCtxTime);
+    this.startCtxTime = this.audioCtx.currentTime + LEAD_IN - this.startOffset;
+    src.start(this.audioCtx.currentTime + LEAD_IN, this.startOffset);
     this.source = src;
     // Hardware output latency (headphones/Bluetooth) — compensate judging
     // and visuals automatically; the manual offset stays for fine-tuning.
@@ -480,6 +489,10 @@ export class Engine {
   /** A lane went fully up — settle any hold riding it. */
   private releaseLane(lane: number): void {
     const t = this.songTime() - this.effOffset();
+    if (this.author) {
+      this.finalizeAuthorPress(lane, t);
+      return;
+    }
     for (const n of this.liveHolds) {
       if (n.lane === lane && n.holding && !n.holdDone) {
         n.holding = false;
@@ -518,10 +531,11 @@ export class Engine {
     buzz(6);
     const t = this.songTime() - this.effOffset();
 
-    // Chart studio: record the tap instead of judging anything.
+    // Chart studio: a press starts a pending note; the release decides
+    // whether it was a tap or (long press) a hold tile.
     if (this.author) {
-      if (t >= 0 && t <= this.map.duration) {
-        this.authorTaps.push({ t, lane });
+      if (t >= this.armAt && t <= this.map.duration && this.authorPending[lane] < 0) {
+        this.authorPending[lane] = t;
         this.rings.push({
           lane,
           born: now,
@@ -666,8 +680,34 @@ export class Engine {
     return this.replayEvents;
   }
 
-  /** Chart studio: raw recorded taps (already latency-compensated). */
-  getAuthorTaps(): { t: number; lane: number }[] {
+  /** Press shorter than this records a tap; longer records a hold tile. */
+  private static readonly AUTHOR_HOLD_MIN = 0.4;
+
+  private finalizeAuthorPress(lane: number, t: number): void {
+    const start = this.authorPending[lane];
+    if (start < 0) return;
+    this.authorPending[lane] = -1;
+    const dur = Math.min(t, this.map.duration) - start;
+    if (dur >= Engine.AUTHOR_HOLD_MIN) {
+      this.authorTaps.push({ t: start, lane, dur });
+      this.texts.push({
+        lane,
+        born: performance.now(),
+        text: 'HOLD',
+        color: '#9dffc9',
+      });
+    } else {
+      this.authorTaps.push({ t: start, lane });
+    }
+  }
+
+  /** Chart studio: recorded presses (latency-compensated); flushes any
+   * presses still held down. */
+  getAuthorTaps(): { t: number; lane: number; dur?: number }[] {
+    const t = this.songTime() - this.effOffset();
+    for (let lane = 0; lane < LANES; lane++) {
+      this.finalizeAuthorPress(lane, t);
+    }
     return this.authorTaps;
   }
 
@@ -2247,17 +2287,24 @@ export class Engine {
     g.fillRect(bx, by, 4.5 * dpr, 14 * dpr);
     g.fillRect(bx + 8.5 * dpr, by, 4.5 * dpr, 14 * dpr);
 
-    // countdown before the music starts
-    if (t < 0) {
+    // countdown until recording arms (handles punch-in pre-roll too)
+    const wait = this.armAt - t;
+    if (wait > 0) {
       g.save();
       g.textAlign = 'center';
-      const count = Math.ceil(-t);
+      const count = Math.ceil(wait);
       g.fillStyle = '#ffffff';
       g.font = `900 ${Math.round(56 * dpr)}px ${COMIC_FONT}`;
       if (count <= 3) g.fillText(String(count), w / 2, h * 0.45);
       g.globalAlpha = 0.6;
       g.font = `600 ${Math.round(12 * dpr)}px system-ui, sans-serif`;
-      g.fillText('Tap the lanes where tiles should fall', w / 2, h * 0.53);
+      g.fillText(
+        this.armAt > 0.5 && t >= this.startOffset - 0.1
+          ? 'Listen — recording arms at the marker'
+          : 'Tap where tiles should fall · long-press for holds',
+        w / 2,
+        h * 0.53
+      );
       g.restore();
     }
   }

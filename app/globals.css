@@ -826,3 +826,26 @@ button {
   padding: 11px 30px;
   font-size: 14px;
 }
+
+.scrub-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: min(360px, 86vw);
+}
+
+.scrub-row input[type='range'] {
+  flex: 1;
+  accent-color: var(--neon);
+  min-width: 100px;
+}
+
+.scrub-btn {
+  white-space: nowrap;
+  padding: 11px 16px;
+}
+
+.scrub-hint {
+  margin-top: -8px;
+  font-size: 12px;
+}
